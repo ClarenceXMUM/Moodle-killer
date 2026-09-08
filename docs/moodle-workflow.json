@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Moodle-killer 通知流水线",
+    "subtitle": "脚本先扛，Agent 兜底，每步校验",
+    "locale": "zh-CN",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "output": "docs/moodle-workflow.html"
+  },
+  "lanes": [
+    { "id": "sched", "label": "调度" },
+    { "id": "pipe", "label": "脚本 · 确定性" },
+    { "id": "agent", "label": "Agent 兜底" },
+    { "id": "verify", "label": "校验", "variant": "exception" },
+    { "id": "deliver", "label": "交付" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "触发 + 配置", "fromCol": 0, "toCol": 1 },
+    { "id": "extract", "label": "抓取", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "decide", "label": "分桶 + 推送", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "groups": [
+    { "id": "setup_path", "label": "首次配置", "lane": "sched", "fromCol": 0, "toCol": 1, "variant": "dashed" },
+    { "id": "fallback_path", "label": "未命中兜底", "lane": "agent", "fromCol": 4, "toCol": 5, "variant": "emphasis" },
+    { "id": "verify_path", "label": "四步校验", "lane": "verify", "fromCol": 3, "toCol": 5, "variant": "security" }
+  ],
+  "mainPath": ["trigger", "login", "fetch", "classify", "signal", "send"],
+  "nodes": [
+    { "id": "trigger", "lane": "sched", "col": 0, "type": "external", "label": "定时触发", "sublabel": "cron @ 08:30", "width": 140 },
+    { "id": "setup", "lane": "sched", "col": 1, "type": "frontend", "label": "首次配置", "sublabel": "setup_moodle.py 选课 + 定下载路径", "width": 148 },
+    { "id": "login", "lane": "pipe", "col": 1, "type": "backend", "label": "登录校验", "sublabel": "MoodleClient 登录态", "width": 136 },
+    { "id": "fetch", "lane": "pipe", "col": 2, "type": "backend", "label": "抓取通知 + 扫课", "sublabel": "notifications + 每门课 scan_course", "width": 152 },
+    { "id": "classify", "lane": "pipe", "col": 3, "type": "messagebus", "label": "关键词打桶", "sublabel": "命中出固定信号", "width": 136 },
+    { "id": "signal", "lane": "pipe", "col": 4, "type": "backend", "label": "高密度信号", "sublabel": "≤5 行纯信号 / 心跳回执", "width": 148 },
+    { "id": "fallback", "lane": "agent", "col": 4, "type": "frontend", "label": "Agent 兜底判断", "sublabel": "读 user_requirements.md 定推不推", "width": 148 },
+    { "id": "verify", "lane": "verify", "col": 3, "type": "security", "label": "四步校验", "sublabel": "登录/抓全/下载落地/课程扫全", "width": 148 },
+    { "id": "send", "lane": "deliver", "col": 5, "type": "cloud", "label": "推送", "sublabel": "WhatsApp / Telegram / Webhook", "width": 148 }
+  ],
+  "edges": [
+    { "id": "cr-setup", "from": "trigger", "to": "setup", "label": "仅首次", "variant": "dashed", "role": "branch" },
+    { "id": "cr-login", "from": "trigger", "to": "login", "variant": "emphasis" },
+    { "id": "setup-login", "from": "setup", "to": "login", "label": "courses.json", "variant": "dashed", "role": "return" },
+    { "id": "login-fetch", "from": "login", "to": "fetch", "variant": "default" },
+    { "id": "fetch-classify", "from": "fetch", "to": "classify", "variant": "default" },
+    { "id": "classify-signal", "from": "classify", "to": "signal", "label": "命中", "variant": "emphasis" },
+    { "id": "classify-fallback", "from": "classify", "to": "fallback", "label": "未命中", "variant": "dashed", "role": "branch" },
+    { "id": "signal-send", "from": "signal", "to": "send", "variant": "default" },
+    { "id": "fallback-send", "from": "fallback", "to": "send", "variant": "default" },
+    { "id": "verify-send", "from": "verify", "to": "send", "label": "❌ 告警", "variant": "security", "role": "error", "route": "outside-right", "fromSide": "right", "toSide": "right", "width": 1.2 }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "脚本先扛",
+      "items": [
+        "关键词命中的通知脚本直接出固定信号，零 LLM",
+        "秒级、确定、不超时 —— 95% 的日常通知走这条路"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Agent 只兜底",
+      "items": [
+        "未命中关键词才让 Agent 读 user_requirements.md 判断推不推",
+        "每步校验失败必须透出 ❌ 告警，静默 ≠ 故障"
+      ]
+    }
+  ]
+}

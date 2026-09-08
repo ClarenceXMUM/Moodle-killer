@@ -1,0 +1,22 @@
+# ================= 账户与推送配置 =================
+# 复制本文件为 config.yaml 填入真实值。config.yaml 已被 .gitignore 排除。
+
+# --- Moodle（必填）---
+moodle:
+  url: https://l.xmu.edu.my      # 你的 Moodle 站点根地址
+  user: ""                        # 学号/用户名
+  password: ""                    # 密码
+
+# --- 发送介质（可扩展）---
+delivery:
+  channel: whatsapp               # whatsapp | telegram | webhook | none
+  # WhatsApp（Hermes 网关用户）
+  whatsapp:
+    to: ""                        # 接收号码，如 60123456789
+  # Telegram（通用用户推荐：@BotFather 建 bot 即得 token，零门槛）
+  telegram:
+    bot_token: ""
+    chat_id: ""
+  # 通用 Webhook（钉钉/飞书/企业微信/自建服务，POST JSON {"text": "..."})
+  webhook:
+    url: ""
