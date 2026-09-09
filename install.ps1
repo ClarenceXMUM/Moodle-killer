@@ -1,7 +1,11 @@
 # Moodle-killer 一键安装（Windows / PowerShell）
-#
+# 
 # 用法：在这个文件夹里右键 → “在终端中打开” → 运行：
-#   powershell -ExecutionPolicy Bypass -File .\install.ps1
+#   powershell -ExecutionPolicy Bypass -File .\\install.ps1
+# 
+# 前置条件：您需要先克隆此仓库：
+#   git clone https://github.com/ClarenceXMUM/Moodle-killer.git
+#   cd Moodle-killer
 #
 # 做的事：
 #   1) 检查 Python 和依赖

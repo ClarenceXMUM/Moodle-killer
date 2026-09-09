@@ -56,7 +56,11 @@ cd Moodle-killer
 ```
 
 **Windows：**
-用 PowerShell 运行 `install.ps1`。
+```bash
+git clone https://github.com/ClarenceXMUM/Moodle-killer.git
+cd Moodle-killer
+powershell -ExecutionPolicy Bypass -File .\install.ps1   # 检查依赖 + 装到 3 个标准技能目录 + 生成 mk 命令
+```
 
 ### 初始化与测试
 

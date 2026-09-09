@@ -3,8 +3,12 @@
 #   Windows 用户请用 install.ps1（右键 → 用 PowerShell 运行）
 #
 # 用法：
-#   ./install.sh              # 装到 3 个标准技能目录 + 生成 mk 命令
-#   ./install.sh --dry-run    # 只看会做什么，不动文件
+#   前置条件：您需要先克隆此仓库：
+#     git clone https://github.com/ClarenceXMUM/Moodle-killer.git
+#     cd Moodle-killer
+#   然后执行：
+#     ./install.sh              # 装到 3 个标准技能目录 + 生成 mk 命令
+#     ./install.sh --dry-run    # 只看会做什么，不动文件
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
