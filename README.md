@@ -1,82 +1,182 @@
 # Moodle-killer
 
-![License](https://img.shields.io/badge/license-MIT-blue) ![Python](https://img.shields.io/badge/python-3.9%2B-blue) ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+> *The Moodle system is so annoying, that's why the project exists.*
 
+<!-- 顶部预览图：把图片放进 docs/ 目录后引用，支持控制宽度与居中 -->
+<p align="center">
+  <img src="docs/social-preview.png" alt="Moodle-killer Preview" width="800" />
+</p>
 
-**框架无关的学业通知 Agent**：定时抓取 Moodle 课程动态 → 过滤噪音 → 关键词分类 → 高密度摘要推送。可在任意本地 Agent（Hermes 等）或纯 cron 环境运行。
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License" />
+  <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platform" />
+</p>
 
-```
-[定时触发] → 抓取（Moodle HTTP）→ 噪音过滤 → 关键词打桶
-     ├─ 命中 → 固定信号（零 LLM，秒级）
-     ├─ 未命中 → out/unclassified_moodle.json → Agent 读 user_requirements.md（见下）兜底判断
-     └→ 每步校验（登录/抓全/下载/课程扫全）→ 推送（WhatsApp/Telegram/Webhook）
+### 为什么做这个项目？
+
+很简单：
+每天上课前都要点开 Moodle，一个个课程查看是否有新课件要下载，还要手动勾选那个 Done 让进度条保持 100%，非常烦人。
+所以开发了这个工具，把重复动作省下来的时间留给自己。
+
+### 核心目标
+
+1. **一学期配置一次，一劳永逸**
+2. **任何 Agent 框架都能用**，即使是豆包 (bushi) 或纯定时任务
+3. **满足个性化需求** → 例如详细到哪种文件存到哪个本地文件夹
+
+---
+
+**学业通知 Agent**：定时抓 Moodle 课程动态 → 过滤噪音 → 关键词分类 → 高密度摘要推送。可在任意本地 Agent（Hermes / Claude Code / Codex / Workbuddy / 豆包 …）或纯 cron 环境运行。
+
+```text
+[定时触发] → 抓取 → 噪音过滤 → 关键词分类
+     ├─ 命中 → 输出
+     ├─ 未命中 → Agent 读用户规则兜底判断
+     └→ 每步校验 → 推送
 ```
 
 ## 特性
 
-- **脚本先扛，Agent 兜底**：关键词能命中的零 LLM 开销；只有拿不准的才交给 Agent —— 快、稳、不超时
-- **每步验证**：登录成功 / 通知抓全 / 下载落地 / 课程扫全，缺一即报
-- **倒计时精确到时分**：`[新作业] ODE: Project 截止 06/20 10:00 (剩3天2小时15分)`
-- **心跳回执**：无新内容也推 `[Moodle] 已扫5课 无新内容`，静默 ≠ 故障
-- **时效性过滤**：验证码/邀请/限时类自动丢弃（隔日摘要无价值）
-- **用户需求与代码分离**：个性化规则全在 `user_requirements.md`（由 `user_requirements.example.md` 复制生成），改需求不动代码
+- **本地安全**：凭据留本地，不传外部服务，无需担心泄露
+- **脚本先行，Agent 兜底**：规则命中全走脚本；拿不准才交 Agent —— 极速、稳定、不超时
+- **一句话改配置**：`mk set 时间 07:00`、`mk output silent`、`mk add 数学分析`
+- **5 种推送风格**：天天报到 / 没事不扰 / 每日汇总 / 只报紧急 / 全量推送
+- **时分倒计时**：`[新作业] ODE: Project 截止 06/20 10:00 (剩3天2小时15分)`
 
 ## 快速开始
 
+### 安装
+
+**Mac / Linux：**
 ```bash
-# 1. 安装依赖
-pip install -r requirements.txt
-
-# 2. 配置（一份文件管所有凭据）
-cp config.example.yaml config.yaml
-cp user_requirements.example.md user_requirements.md  # 你的个性化规则
-#    编辑 config.yaml：填 Moodle 账号 + 发送通道
-
-# 3. 课程发现与选择（登录 → 列出已加入课程 → 生成 courses.json）
-python3 scripts/setup_moodle.py            # 交互式选择
-python3 scripts/setup_moodle.py --all      # 全部加入
-python3 scripts/setup_moodle.py --all --path ~/School   # 自定义下载根目录
-
-# 4. 试跑
-python3 scripts/moodle_prep.py
-
-# 5. 定时（crontab 示例，每天 08:30）
-30 8 * * * cd <repo>/scripts && python3 moodle_prep.py >> moodle.log 2>&1
+git clone https://github.com/ClarenceXMUM/Moodle-killer.git
+cd Moodle-killer
+./install.sh          # 检查依赖 + 装到 3 个标准技能目录 + 生成 mk 命令
 ```
 
-## 发送通道
+**Windows：**
+用 PowerShell 运行 `install.ps1`。
 
-| 通道 | 配置 | 适用 |
-|------|------|------|
-| `whatsapp` | Hermes 网关用户（cron deliver=whatsapp） | Hermes 生态 |
-| `telegram` | @BotFather 建 bot，填 token + chat_id | 通用，零门槛 |
-| `webhook` | 任意 URL，POST `{"text": ...}` | 钉钉/飞书/企业微信/自建 |
-| `none` | 只跑脚本看 stdout | 调试 |
+### 初始化与测试
 
-Hermes 用户建议另设：`hermes config set cron.wrap_response false`（去掉投递英文框架，只收纯信号）。
+```bash
+mk setup              # 快速配置
+mk test               # 检测是否运行正常
+mk                    # 查看当前状态（配置 / 课程 / 下次推送）
+```
+
+不想用命令行？直接在常用 Agent 聊天里说：
+> 「配置 moodle」「moodle 状态」「moodle 改推送时间 07:00」
+
+## 常用命令
+
+| 命令 | 作用 |
+|---|---|
+| `mk` | 查看当前状态 |
+| `mk setup` | 引导式配置 |
+| `mk set 时间 07:00` | 改一项配置；不带值查看当前值 |
+| `mk add` / `mk rm 课名` | 加课 / 删课 |
+| `mk output silent` | 换推送风格（heartbeat / silent / digest / urgent / full） |
+| `mk channel [通道]` | 换推送通道（auto / local / telegram / webhook / ntfy） |
+| `mk test` | 试跑，不推送 |
+| `mk find 概率` | 智能找课件文件夹 |
+| `mk doctor` | 检查环境与状态，给出修复建议 |
+| `mk sandbox` | 创建隔离测试环境，不碰现有配置 |
+| `mk pause` / `mk resume` | 暂停 / 恢复推送 |
+| `mk help` | 全部命令 |
+
+更多命令（`mk output --demo`、`mk mute`、`mk schedule`、`mk set --advanced`、任何命令加 `--json`）→ `mk help`，或看 [`moodle-killer/references/CONFIG.md`](moodle-killer/references/CONFIG.md)。
+
+## 5 种推送风格
+
+<!-- 输出效果对比图：截屏后放进 docs/ 目录引用 -->
+<p align="center">
+  <img src="docs/demo-output.png" alt="输出效果演示" width="800" />
+</p>
+
+```bash
+mk output --demo      # 预览 5 种风格（并排打印，不联网不推送）
+
+mk output heartbeat   # 默认：没事也报一句「已扫5课 无新内容」
+mk output silent      # 没事完全不说话
+mk output digest      # 每天一条汇总
+mk output urgent      # 只报 24h 内截止 + 新成绩
+mk output full        # 全都报
+```
+
+实际输出样例与对比说明 → [`moodle-killer/references/OUTPUT-MODES.md`](moodle-killer/references/OUTPUT-MODES.md)
+
+## 推送通道
+
+默认通道为 `auto`：Agent 里直接回显，后台定时任务走系统通知。
+
+需要推送到其他设备，可指定通道：
+
+| 通道 | 需要配什么 | 适用 |
+|---|---|---|
+| `auto` | 无 | 自动跟随环境（默认） |
+| `local` | 无 | 本机通知 + 本地文件 |
+| `telegram` | bot token + chat_id | 通用，零门槛 |
+| `webhook` | URL | 钉钉 / 飞书 / 企业微信 / 自建 |
+| `ntfy` | topic 名 | 手机推送，免注册 |
+| `hermes` | Hermes 网关 | Hermes 生态 |
+| `none` | 无 | 只跑脚本看 stdout |
+
+```bash
+mk channel telegram
+mk set delivery.telegram.bot_token <token>
+mk set delivery.telegram.chat_id <id>
+```
+
+## 你的数据住在哪
+
+```text
+~/.moodle-killer/            ← 不在仓库里，升级/重装不丢
+├── config.yaml              # 账号 + 偏好（权限 600）
+├── courses.json             # 目前盯的课
+├── user_requirements.md     # 你的个性化规则（Agent 读）
+├── out/                     # signals.txt / unclassified_moodle.json / verify_report.txt
+├── state/                   # 每门课「已见过」记录
+└── logs/
+```
+
+`MOODLE_KILLER_HOME` 可覆盖这个位置。老版本放在仓库里的配置会自动迁移过来。
 
 ## 目录结构
 
-```
+```text
 Moodle-killer/
-├── docs/AGENT-SKILL.md       # Agent 细则（关键词规则/兜底判断/输出契约/验证清单）
-├── user_requirements.example.md  # 用户个性化规则模板（cp 成自己的 user_requirements.md）
-├── config.example.yaml       # 配置模板（账户/发送通道）
-├── scripts/
-│   ├── appconfig.py          # 配置加载器（config.yaml → env → 默认值）
-│   ├── setup_moodle.py       # 课程发现 + 配置生成（Setup/onboarding）
-│   ├── moodle_client.py      # Moodle HTTP 客户端（登录/通知/扫课/下载）
-│   ├── moodle_prep.py        # Moodle 预处理（抓取+分类+校验）
-│   ├── classify.py           # 通用关键词打桶
-│   ├── verify.py             # 四步校验 + 行数校验
-│   ├── sender.py             # 发送模块（telegram/webhook/whatsapp）
-│   └── run_pipeline.sh       # 串联全流程
-└── requirements.txt
+├── install.sh                       # 一键安装（macOS / Linux）
+├── install.ps1                      # 一键安装（Windows / PowerShell）
+├── moodle-killer/                   # 技能包（可整体复制到任意助手）
+│   ├── SKILL.md                     # 技能说明（命令 / 触发词 / 风格 / 规矩）
+│   ├── scripts/
+│   │   ├── mk.py                    # 唯一命令入口
+│   │   ├── moodle_prep.py           # 主流程：抓取 + 分类 + 校验 + 输出
+│   │   ├── moodle_client.py         # Moodle HTTP 客户端
+│   │   ├── config_store.py          # 配置/数据目录的唯一真相源
+│   │   ├── onboarding.py            # 引导式配置
+│   │   ├── sender.py                # 推送通道（auto 跟随平台）
+│   │   ├── platform_support.py      # 平台差异分支（Mac / Windows / Linux）
+│   │   ├── pathfinder.py            # 自动找课件文件夹 + 编号挑选
+│   │   ├── sandbox.py               # 隔离测试环境（mk sandbox）
+│   │   ├── verify.py                # 步骤校验 + 自检
+│   │   └── harness_install.py       # 装到 3 个标准技能目录
+│   ├── references/                  # 配置 / 风格 / 排障 / 沙盒细则
+│   ├── templates/                   # 配置模板
+│   └── agents/                      # 框架专属适配（预留）
+└── docs/                            # 架构图等
 ```
 
 ## 设计原则
 
-1. **脚本只做确定性的事**：抓取、通用过滤、倒计时计算、校验——人人一样，不用判断
-2. **用户需求归文件**：课程专属规则、什么值得推、文件归类——Agent 读了执行，改需求不动代码
-3. **Agent 只做判断**：兜底队列逐条裁决（「明天早上看到仍有用吗」），表达守契约
-4. **每步可验证**：校验不过宁可报错，不推赌运气的结果
+1. **脚本处理确定逻辑**：抓取、过滤、算倒计时、做校验，稳定秒级跑完
+2. **规则外置于文件**：专属规则写进 Markdown，改需求不碰代码
+3. **Agent 专职裁决**：只审兜底队列，判断是否值得推，严守输出格式
+4. **关键步骤强校验**：各环节自检，出错直接报错，拒绝残缺推送
+5. **技能只读，数据外置**：配置和数据放本地目录，升级更新不丢数据
+
+## 致谢 / License
+
+MIT — 见 [LICENSE](LICENSE)。贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)。

@@ -1,0 +1,61 @@
+# ================= Moodle-killer 配置模板 =================
+#
+# 一般不用手动改这个文件：跑 `mk setup` 会一步步问，自动写到
+#     ~/.moodle-killer/config.yaml
+# 想改某一项：`mk set 时间 07:00`（`mk set --advanced` 看高级项）
+#
+# 这份模板只是给你看「有哪些配置项」。要手动起一份：
+#     mkdir -p ~/.moodle-killer
+#     cp config.example.yaml ~/.moodle-killer/config.yaml
+#     chmod 600 ~/.moodle-killer/config.yaml
+#
+# 真实凭据永远不要提交到 git（仓库 .gitignore 已挡，但别放松）。
+
+# --- Moodle 账号（必填）---
+moodle:
+  url: https://l.xmu.edu.my      # 你的 Moodle 站点根地址
+  user: ""                        # 学号 / 用户名
+  password: ""                    # 密码（只存本机，权限 600）
+
+# --- 什么时候推 ---
+delivery:
+  channel: local                  # local | hermes | telegram | ntfy | webhook | whatsapp | none
+  schedule: "08:30"               # 一个或多个时间点，逗号隔开："08:30,20:00"
+  weekend: true                   # 周末是否推送
+  timezone: Asia/Kuala_Lumpur
+  # 各通道的凭据（只填你用到的那个）
+  telegram:
+    bot_token: ""                 # @BotFather 建 bot 拿
+    chat_id: ""
+  ntfy:
+    server: https://ntfy.sh
+    topic: ""                     # 自己起个别人猜不到的名字
+  webhook:
+    url: ""                       # POST {"text": "..."}，钉钉/飞书/企业微信/自建
+  whatsapp:
+    to: ""                        # 国际格式，如 60123456789（走 Hermes 网关）
+  email:
+    to: ""                        # 备用
+
+# --- 文件下载到哪 ---
+download:
+  root: ~/School                  # 根目录
+  per_course: true                # 每门课一个子文件夹
+  by_type: false                  # 高级：课内再按文件类型分（Assignment/Slides/Textbook/Other）
+  type_map:                       # 高级：类型关键词（by_type 打开后才用）
+    Assignment: [assignment, homework, 作业, tutorial]
+    Slides: [slide, lecture, chapter, 笔记]
+    Textbook: [textbook, book, reading, 参考]
+    Other: []
+
+# --- 推送风格 ---
+output:
+  mode: heartbeat                 # heartbeat | silent | digest | urgent | full
+  max_lines: 5                    # 单次最多几行（full 不受限）
+  lang: zh
+
+# --- 高级（mk set --advanced 才看得到）---
+advanced:
+  verify_strict: true             # 校验不过就不推（不建议关）
+  keep_days: 30                   # 状态文件保留天数，0 = 永久
+  paused: false                   # 暂停推送（脚本照跑）

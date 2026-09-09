@@ -7,24 +7,25 @@
 import json
 import os
 import re
-import sys
 from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
 
-from appconfig import moodle_creds
-
-STATE_DIR = os.path.expanduser("~/.notification-agent/moodle_state")
+import config_store as cs
 
 
 class MoodleClient:
     def __init__(self, base_url=None, username=None, password=None, state_dir=None):
-        url, user, pwd = moodle_creds()
+        cfg = cs.load_config()
+        url = cs.get_path(cfg, "moodle.url") or ""
+        user = cs.get_path(cfg, "moodle.user") or ""
+        pwd = cs.get_path(cfg, "moodle.password") or ""
+        self.cfg = cfg
         self.base_url = (base_url or url).rstrip("/")
         self.username = username or user
         self.password = password or pwd
-        self.state_dir = state_dir or STATE_DIR
+        self.state_dir = state_dir or str(cs.state_dir())
         os.makedirs(self.state_dir, exist_ok=True)
         self.session = requests.Session()
         self.session.headers.update({
@@ -33,7 +34,7 @@ class MoodleClient:
         self.notifications = []
         self._creds_ok = bool(self.username and self.password)
         if not self._creds_ok:
-            raise SystemExit("❌ Moodle 凭据缺失：请在 config.yaml 填 moodle.user / moodle.password")
+            raise SystemExit("❌ 还没填 Moodle 账号。跑 `mk setup`，或 `mk set 账号 你的学号` + `mk set 密码 xxx`")
 
     # ---------- 登录 ----------
     def login(self):
@@ -154,7 +155,22 @@ class MoodleClient:
             return {"name": "", "due": "", "status": f"错误: {e}", "graded": ""}
 
     # ---------- 下载 ----------
-    def download_file(self, resource_url, resource_name, download_dir):
+    def type_subdir(self, resource_name):
+        """按文件名猜类型，返回子文件夹名（高级设置 download.by_type 用）。
+
+        规则来自 config.yaml 的 download.type_map，用户可以自己加关键词。
+        """
+        tmap = cs.get_path(self.cfg, "download.type_map") or {}
+        low = (resource_name or "").lower()
+        for folder, keywords in tmap.items():
+            for kw in (keywords or []):
+                if kw and str(kw).lower() in low:
+                    return folder
+        return "Other"
+
+    def download_file(self, resource_url, resource_name, download_dir, subdir=None):
+        if subdir:
+            download_dir = os.path.join(download_dir, subdir)
         os.makedirs(download_dir, exist_ok=True)
         safe = re.sub(r"[^\w\s-]", "", resource_name)
         safe = re.sub(r"[-\s]+", "-", safe).strip("-") or "file"
@@ -215,14 +231,21 @@ class MoodleClient:
         return new, prev.get("assignments", {})
 
     # ---------- 单课扫描（prep 主入口）----------
-    def scan_course(self, course_id, course_name, download=True, download_dir=None):
+    def scan_course(self, course_id, course_name, download=True, download_dir=None, by_type=None):
         acts = self.get_course_activities(course_id)
         new_files, prev_assign = self.diff_new_files(course_id, acts)
         result = {"name": course_name, "new_files": [], "assignments": {}, "notes": []}
+        if by_type is None:
+            by_type = bool(cs.get_path(self.cfg, "download.by_type"))
         if download:
             for iid, info in new_files.items():
-                print(f"   📥 下载: {info['name']}")
-                fname, ok = self.download_file(info["url"], info["name"], download_dir or ".")
+                sub = self.type_subdir(info["name"]) if by_type else None
+                if sub:
+                    print(f"   📥 下载: {info['name']}  → {sub}/")
+                else:
+                    print(f"   📥 下载: {info['name']}")
+                fname, ok = self.download_file(info["url"], info["name"],
+                                               download_dir or ".", subdir=sub)
                 if ok:
                     result["new_files"].append(info["name"])
         else:

@@ -4,6 +4,9 @@ config.yaml
 user_requirements.md
 courses.json
 out/
+state/
+logs/
+install.json
 PROJECT.md
 __pycache__/
 *.pyc

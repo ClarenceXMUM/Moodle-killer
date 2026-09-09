@@ -8,16 +8,17 @@ Open an [Issue](../../issues) and include:
 
 1. What you expected vs. what happened
 2. The relevant log line or verification output (`❌` / heartbeat lines are designed to pinpoint failures)
-3. Your setup: OS, Python version, delivery channel (`whatsapp` / `telegram` / `webhook` / `none`)
+3. Your setup: OS, Python version, delivery channel (`whatsapp` / `telegram` / `webhook` / `none`), and the output of `mk doctor`
 
-**Never paste real credentials** (passwords, app passwords, tokens) into issues or logs. `config.yaml` is gitignored for a reason — keep it that way.
+**Never paste real credentials** (passwords, app passwords, tokens) into issues or logs. Runtime config lives in `~/.moodle-killer/config.yaml` and is never committed — keep it that way.
 
 ## Pull requests
 
 1. Fork → create a branch → make your change
-2. Test it end-to-end: run the pipeline with `delivery.channel: none` and confirm the verification output is clean
+2. Test it end-to-end: `mk test` (dry run, no push) and `mk doctor` — both must be clean
 3. Keep the core design principle intact: **scripts first, Agent as fallback** — deterministic keyword hits should stay zero-LLM
-4. Personal rules belong in `user_requirements.md` (runtime), not in scripts
+4. Personal rules belong in `~/.moodle-killer/user_requirements.md` (runtime), not in scripts
+5. Layout: skill package = `moodle-killer/` (`scripts/`, `references/`, `templates/`, `agents/`); user data = `~/.moodle-killer/`. Don't write user data into the package.
 
 ## Scope notes
 
