@@ -13,6 +13,8 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platform" />
 </p>
 
+## 写在前面
+
 ### 为什么做这个项目？
 
 很简单：
@@ -21,9 +23,22 @@
 
 ### 核心目标
 
-1. **一学期配置一次，一劳永逸**
-2. **任何 Agent 框架都能用**，即使是豆包 (bushi) 或纯定时任务
+1. **一学期配置一次，一劳永逸**，减少 90% 手动开启 Moodle 找东西的次数
+2. **任何 Agent 框架都能用**，即使是豆包 (bushi) 
 3. **满足个性化需求** → 例如详细到哪种文件存到哪个本地文件夹
+
+### 可能存在的问题
+
+1.我的账号密码安全吗？
+绝对安全，一旦你下载了 Skill，这个 Skill 就是你的，不会把数据传输到我这，也不会被 Agent 挂到网上。
+2.这个 skill 怎么使用？
+有一个 Agent 框架，告诉它装这个就好，AI 时代，你至少有一个 ChatGPT，对于中国用户来说豆包可能更多
+3.有一些我平常用的功能这个 skill 没有怎么办？
+直接在 Issue 里面描述问题提交给我即可，如果你有一点点代码开发基础的话，自己改也是可以的，我留了一份文档供你的 Agent 参考
+4.This skill doesn‘t have my first language
+This skill is for XMUM student temporarily, but the student whose university uses Moodle also can use by changing the default page. Considering there must be many people from non-speaking-English country, I will try to add more languages as I know. Please create issue to here if your mother tongue isn't here.
+5.可能存在更多我没想过的问题
+这很合理，出现问题既有你的打开方式不对，也有我的设计失误，所以无论多奇怪的问题都可以 issue 我，这样我能了解在存在的设计不足或是功能缺失。
 
 ---
 
