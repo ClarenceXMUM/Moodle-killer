@@ -29,18 +29,29 @@
 2. **任何 Agent 框架都能用**，即使是豆包 (bushi) 
 3. **满足个性化需求** → 例如详细到哪种文件存到哪个本地文件夹
 
+### 懒人专属：一句话装进你的 Agent
+如果你正在使用任意支持运行命令或安装技能的 AI 助手（Claude Code、Codex、Hermes、豆包桌面端、Workbuddy 等），直接复制下面这句话发给它即可自动完成安装与配置：
+
+> **「请帮我克隆 https://github.com/ClarenceXMUM/Moodle-killer 仓库，执行安装脚本装成技能，然后运行 mk setup 引导我配置 Moodle。」**
+
+---
+
 ### 可能存在的问题
 
-1.我的账号密码安全吗？
-绝对安全，一旦你下载了 Skill，这个 Skill 就是你的，不会把数据传输到我这，也不会被 Agent 挂到网上。
-2.这个 skill 怎么使用？
-有一个 Agent 框架，告诉它装这个就好，AI 时代，你至少有一个 ChatGPT，对于中国用户来说豆包可能更多
-3.有一些我平常用的功能这个 skill 没有怎么办？
-直接在 Issue 里面描述问题提交给我即可，如果你有一点点代码开发基础的话，自己改也是可以的，我留了一份文档供你的 Agent 参考
-4.This skill doesn‘t have my first language
-This skill is for XMUM student temporarily, but the student whose university uses Moodle also can use by changing the default page. Considering there must be many people from non-speaking-English country, I will try to add more languages as I know. Please create issue to here if your mother tongue isn't here.
-5.可能存在更多我没想过的问题
-这很合理，出现问题既有你的打开方式不对，也有我的设计失误，所以无论多奇怪的问题都可以 issue 我，这样我能了解在存在的设计不足或是功能缺失。
+**1. 我的账号密码安全吗？**  
+绝对安全。一旦你下载了 Skill，这个 Skill 就是属于你的，所有凭据仅加密存放在你本地电脑的 `~/.moodle-killer/` 中，绝不会把数据传输到我这里，也不会被 Agent 挂到网上。
+
+**2. 这个 skill 怎么使用？**  
+只要你有一个本地 Agent 框架，把上面那句话发给它即可。AI 时代，你至少有一个 ChatGPT，对于中国用户来说豆包可能更多，只要它能跑命令就能用。
+
+**3. 有一些我平常用的功能这个 skill 没有怎么办？**  
+直接在 Issue 里面描述问题提交给我即可。如果你有一点点代码开发基础的话，自己改也是可以的，仓库里留了一份完整的文档供你的 Agent 查阅参考。
+
+**4. This skill doesn't have my first language?**  
+This skill is for XMUM students temporarily, but students whose universities use Moodle can also use it by changing the default page. Considering there are many users from non-English-speaking countries, I will try to add more languages. Please create an issue here if your mother tongue isn't supported yet.
+
+**5. 可能存在更多我没想过的问题？**  
+这很合理。出现问题既可能是你的打开方式不对，也可能是我的设计失误。所以无论遇到多奇怪的问题，都欢迎在 Issue 中反馈，这样我能持续了解并改进设计不足与功能缺失。
 
 ---
 
