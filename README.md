@@ -15,6 +15,8 @@
 
 ## 写在前面
 
+**适用范围**：原生支持标准用户名/密码表单登录的 Moodle 站点（如厦门大学马来西亚分校 XMUM 等）。暂不支持 CAS 统一身份认证跳转与强制二次验证（2FA）。其他学校请在 `mk setup` 中填写学校的 Moodle 完整网址。
+
 ### 为什么做这个项目？
 
 很简单：
@@ -67,21 +69,24 @@ This skill is for XMUM student temporarily, but the student whose university use
 ```bash
 git clone https://github.com/ClarenceXMUM/Moodle-killer.git
 cd Moodle-killer
-./install.sh          # 检查依赖 + 装到 3 个标准技能目录 + 生成 mk 命令
+./install.sh          # 自动补齐依赖 + 装到 3 个标准技能目录 + 生成 mk 命令
 ```
 
 **Windows：**
 ```bash
 git clone https://github.com/ClarenceXMUM/Moodle-killer.git
 cd Moodle-killer
-powershell -ExecutionPolicy Bypass -File .\install.ps1   # 检查依赖 + 装到 3 个标准技能目录 + 生成 mk 命令
+powershell -ExecutionPolicy Bypass -File .\install.ps1   # 自动补齐依赖 + 装到 3 个标准技能目录 + 生成 mk 命令
 ```
+
+需要 Python 3.9+。Mac/Linux 若系统受 PEP 668 管理、无法直接装依赖，安装器会尝试在数据目录下创建 `venv/`，并让 `mk` 使用这个环境。任何依赖安装或复检失败都会停止安装并提示原因。
 
 ### 初始化与测试
 
 ```bash
 mk setup              # 快速配置
 mk test               # 检测是否运行正常
+mk channel test       # 实际发送测试消息，确认通道可用
 mk                    # 查看当前状态（配置 / 课程 / 下次推送）
 ```
 
@@ -98,6 +103,7 @@ mk                    # 查看当前状态（配置 / 课程 / 下次推送）
 | `mk add` / `mk rm 课名` | 加课 / 删课 |
 | `mk output silent` | 换推送风格（heartbeat / silent / digest / urgent / full） |
 | `mk channel [通道]` | 换推送通道（auto / local / telegram / webhook / ntfy） |
+| `mk channel test` / `mk send "测试消息"` | 通过当前通道实际发送一条测试消息 |
 | `mk test` | 试跑，不推送 |
 | `mk find 概率` | 智能找课件文件夹 |
 | `mk doctor` | 检查环境与状态，给出修复建议 |
@@ -109,10 +115,15 @@ mk                    # 查看当前状态（配置 / 课程 / 下次推送）
 
 ## 5 种推送风格
 
-<!-- 输出效果对比图：截屏后放进 docs/ 目录引用 -->
-<p align="center">
-  <img src="docs/demo-output.png" alt="输出效果演示" width="800" />
-</p>
+`mk output --demo` 的内容示例（时间和倒计时随运行时刻变化）：
+
+```text
+[成绩] 线性代数: 期中小测 已出分 85/100
+[公告] 写作: 周五的课调到 10:00
+[新文件] 线性代数: lecture05.pdf 已下载
+```
+
+无新内容时，`heartbeat` 仍报告扫描状态，`silent` 和 `urgent` 不发送消息。
 
 ```bash
 mk output --demo      # 预览 5 种风格（并排打印，不联网不推送）
@@ -128,7 +139,7 @@ mk output full        # 全都报
 
 ## 推送通道
 
-默认通道为 `auto`：Agent 里直接回显，后台定时任务走系统通知。
+默认通道为 `auto`：普通运行和系统定时任务自动调用发送器，发送本机通知。Agent 接管投递时应设置 `MOODLE_KILLER_DELIVERED_BY_AGENT=1`，或显式选择 `hermes` / `whatsapp`；这两种通道只交接给 Agent，单独执行脚本不会向手机发送。`mk test` 始终不实推。
 
 需要推送到其他设备，可指定通道：
 

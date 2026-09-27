@@ -62,10 +62,9 @@ def detect_channel(cfg=None):
     ch = str(cs.get_path(cfg, "delivery.channel") or "auto").strip().lower()
     if ch and ch != "auto":
         return ch, "你在配置里指定的"
-    if os.environ.get("MOODLE_KILLER_DELIVERED_BY_AGENT"):
+    if (os.environ.get("MOODLE_KILLER_DELIVERED_BY_AGENT") or "").lower() in ("1", "true", "yes"):
         return "hermes", "由当前 Agent 平台投递"
-    if os.path.exists(os.path.expanduser("~/.hermes/cron/jobs.json")):
-        return "hermes", "检测到 Hermes 定时任务，交给它投递"
+    # 装过 Hermes 不代表本次由它投递；系统定时任务仍应走本机通知。
     return "local", "没检测到能投递的 Agent 平台，先用本机通知"
 
 
@@ -81,8 +80,7 @@ def _local(text, title):
     out = cs.out_dir() / "sent.log"
     with open(str(out), "a", encoding="utf-8") as f:
         f.write("%s\t%s\n" % (title or "Moodle", text.replace("\n", " | ")))
-    ps.notify(title or "Moodle-killer", text)
-    return True
+    return ps.notify(title or "Moodle-killer", text)
 
 
 def send_text(text, title=None, channel=None, cfg=None, dry_run=False):
@@ -157,7 +155,9 @@ def send_text(text, title=None, channel=None, cfg=None, dry_run=False):
             return True, "email 已发送"
 
         if channel == "local":
-            return _local(text, title), "local 已记录"
+            notified = _local(text, title)
+            return notified, ("local 已记录并提交系统通知" if notified else
+                              "local 已记录，但系统通知失败；请检查通知权限或桌面会话")
 
         return False, "未知通道：%s" % channel
     except Exception as e:

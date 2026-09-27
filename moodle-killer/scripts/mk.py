@@ -16,16 +16,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import config_store as cs  # noqa: E402
 import platform_support as ps  # noqa: E402
+ps.configure_console()
+import config_store as cs  # noqa: E402
 import sandbox as sb  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -268,13 +271,30 @@ def cmd_add(args):
         if not sys.stdin.isatty():
             try:
                 from moodle_client import MoodleClient
-                found = MoodleClient().discover_courses()
-                print("可选课程（用 mk add <名字> 添加）：")
-                for c in found:
-                    print("  · %s" % c.get("name"))
+                client = MoodleClient()
+                # 列课程前必须先登录，否则拿到的是登录页，永远列出空列表。
+                with contextlib.redirect_stdout(sys.stderr):
+                    logged_in = client.login()
+                if not logged_in:
+                    bad("登录失败，先检查账号（mk doctor）")
+                    return 2
+                found = client.discover_courses()
+            except SystemExit as e:
+                bad(str(e))
+                return 2
             except Exception as e:
                 bad("拿课程列表失败：%s" % e)
                 return 2
+            if not found:
+                warn("没拿到课程列表（可能是学校页面结构不同，或本学期还没放出课）")
+                return 2
+            if args.json:
+                print(json.dumps(found, ensure_ascii=False, indent=2))
+                return 0
+            # 带上课程 ID：同名课程（如多个分组）只能靠 ID 区分。
+            print("可选课程（用 mk add <名字> 添加）：")
+            for c in found:
+                print("  · %s (id=%s)" % (c.get("name"), c.get("id")))
             return 0
         okk, msg = onboarding.discover_and_pick(interactive=True)
         print(("✅ " if okk else "❌ ") + msg)
@@ -360,9 +380,21 @@ def _quick_login():
 
 
 def _sync_scheduler(times=None):
-    """时间改了，顺手把系统定时器也改掉（不让配置和现实脱节）。"""
+    """时间改了，顺手把系统定时器也改掉（不让配置和现实脱节）。
+
+    但如果已经挂在 Agent 侧（Hermes 定时任务）上，就绝不再装一个系统定时器——
+    两个调度源同时跑会互相抢：先跑的那个把新文件记成「已看过」，后跑的就只剩「无新内容」。
+    """
     try:
         import onboarding
+    except Exception as e:
+        print("   ⚠️  定时器没更新：%s（可跑 mk schedule 重挂）" % e)
+        return
+    nxt = _hermes_cron_next_run()
+    if nxt:
+        print(_c("90", "   ✅ 已挂在 Hermes 定时任务上（下次 %s），不另装系统定时器（避免双跑抢信号）" % nxt))
+        return
+    try:
         okk, msg = onboarding.install_schedule("auto")
         print("   " + ("✅ " if okk else "⚠️ ") + msg)
     except Exception as e:
@@ -428,7 +460,51 @@ def cmd_output(args):
 
 
 def cmd_channel(args):
+    if args.value == "test":
+        return cmd_send(args)
     return _set_or_show("delivery.channel", args.value, label="推送通道")
+
+
+def cmd_send(args):
+    """显式测试通道，不抓课、不修改配置或扫描状态。"""
+    import sender
+    text = " ".join(getattr(args, "words", []) or []) or "[Moodle] 通道测试：这是一条学业提醒测试消息。"
+    sent, detail = sender.send_text(text, title="Moodle 学业提醒")
+    if args.json:
+        print(json.dumps({"ok": sent, "detail": detail}, ensure_ascii=False))
+    else:
+        (ok if sent else bad)(detail)
+    return 0 if sent else 1
+
+
+_AGENT_PROMPT = """\
+# Moodle-killer 学业定时汇报 Prompt（供 Agent 定时任务直接复制使用）
+# 适用于：Hermes / OpenClaw / Claude Code / Codex / 豆包 等具备远程对话端（Telegram/WhatsApp/Web）的助手。
+
+你是我的 Moodle 学业助理。请按以下流程检查并汇报我今日的最新学业动态：
+
+1. 检查动态：
+   执行命令：python3 -c "import sys, os; sys.path.insert(0, os.path.expanduser('~/.agents/skills/moodle-killer/scripts')); import moodle_prep; moodle_prep.main([])"
+   （如果终端已安装 mk 命令，也可直接执行：mk）
+
+2. 处理输出与兜底：
+   - 提取命令输出的信号列表以及 ~/.moodle-killer/out/signals.txt。
+   - 若 ~/.moodle-killer/out/unclassified_moodle.json 有未命中项，参考 ~/.moodle-killer/user_requirements.md 快速裁决：仅保留“明天早上看到仍有行动价值”的学业事项。
+
+3. 输出要求（直接在当前对话端回复我）：
+   - 若有新作业、新文件、新成绩或到期倒计时：直接输出整理好的高密度信号（每行严格遵守 [分类] 课程: 内容 格式，≤5 行，零寒暄、零多余客套话）。
+   - 若输出为 [SILENT] 或无新内容且非 heartbeat 模式：严格保持静默，不要发送任何消息。
+   - 若扫描出现错误（❌）：必须原样透出错误详情，提醒我检查网络或重新登录。
+"""
+
+
+def cmd_prompt(args):
+    """输出给 Agent 远程控制对话端（Hermes/OpenClaw/Claude等）的定时任务 Prompt。"""
+    if args.json:
+        print(json.dumps({"prompt": _AGENT_PROMPT.strip()}, ensure_ascii=False))
+    else:
+        print(_AGENT_PROMPT.strip())
+    return 0
 
 
 def cmd_time(args):
@@ -753,6 +829,34 @@ def cmd_install(args):
     return harness_install.install(targets=targets, all_harnesses=args.all)
 
 
+def cmd_update(args):
+    """从远端仓库拉取最新代码并同步到所有 Agent 目录。"""
+    import harness_install
+    info = harness_install.load_install_json()
+    src_dir = Path(info.get("skill_dir") or cs.SKILL_DIR)
+    repo = src_dir.parent if src_dir.name == "moodle-killer" else src_dir
+    if not (repo / ".git").is_dir():
+        if (cs.REPO_ROOT / ".git").is_dir():
+            repo = cs.REPO_ROOT
+        else:
+            bad("未找到原始 Git 仓库，无法自动执行 git pull。请前往 GitHub 下载最新版本覆盖：\n  https://github.com/ClarenceXMUM/Moodle-killer")
+            return 1
+
+    print(_c("90", "  正在检查并从 GitHub 拉取最新版本 (%s)…" % repo))
+    p = subprocess.run(["git", "-C", str(repo), "pull", "--ff-only"], capture_output=True, text=True)
+    if p.returncode != 0:
+        bad("更新失败：%s" % (p.stderr or p.stdout).strip())
+        print(_c("90", "  如果有本地修改冲突，可尝试先在仓库目录暂存修改后重试。"))
+        return 1
+    out = (p.stdout or "").strip()
+    if "Already up to date" in out or "已经是最新" in out:
+        ok("当前已是最新版本！")
+    else:
+        ok("代码已更新：%s" % out.splitlines()[-1])
+    harness_install.install()
+    return 0
+
+
 def cmd_uninstall(args):
     import harness_install
     return harness_install.uninstall(args.harness)
@@ -779,6 +883,8 @@ HELP = """\
     mk output [风格]    heartbeat|silent|digest|urgent|full
     mk output --demo    并排看 5 种风格长什么样
     mk channel [通道]   auto|local|hermes|telegram|ntfy|webhook|whatsapp|none
+    mk channel test     测试当前通道（实际发送一条消息）
+    mk send [文字]      通过当前通道发送测试消息
     mk time [HH:MM]     一个或多个，如 08:30,20:00
     mk mute 课名         某门课单独静音 / 恢复
     mk find [关键词]     在电脑里找「像课件的文件夹」，列编号给你挑
@@ -788,7 +894,9 @@ HELP = """\
 
   装到你的 Agent
     mk install          复制到 3 个标准技能目录（自动）
+    mk update           拉取最新代码并自动重新同步
     mk harnesses        看装到哪了；没读到就让 Agent 自己装
+    mk prompt           获取给 Agent 定时任务（Hermes等）的远程对话 Prompt
 
   想试新改动又怕弄乱现有配置
     mk sandbox          造个干净环境（假 HOME + 空工作目录）
@@ -850,6 +958,8 @@ def build_parser():
 
     add("test", cmd_test, "试跑一次")
     add("doctor", cmd_doctor, "体检")
+    sp = add("send", cmd_send, "测试推送通道")
+    sp.add_argument("words", nargs="*")
 
     sp = add("find", cmd_find, "在电脑里找文件夹")
     sp.add_argument("words", nargs="*")
@@ -869,10 +979,13 @@ def build_parser():
     sp.add_argument("harness", nargs="?")
     sp.add_argument("--all", action="store_true")
 
+    add("update", cmd_update, "从远端拉取最新代码并同步")
+
     sp = add("uninstall", cmd_uninstall, "从助手卸载")
     sp.add_argument("harness", nargs="?")
 
     add("harnesses", cmd_harnesses, "看各助手装在哪")
+    add("prompt", cmd_prompt, "获取给 Agent 定时任务的远程对话 Prompt")
     add("help", lambda a: (print(HELP), 0)[1], "帮助")
     return p
 

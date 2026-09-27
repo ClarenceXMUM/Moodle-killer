@@ -45,7 +45,7 @@ def build_blocks(advanced=False):
             "title": "第 1 块 · 你的 Moodle 账号",
             "why": "脚本要用它登录学校站点抓通知。密码只存在你本机，不上传。",
             "questions": [
-                {"key": "moodle.url", "prompt": "学校 Moodle 的网址是什么？",
+                {"key": "moodle.url", "prompt": "学校 Moodle 的网址是什么？（如果是其他学校，请输入您学校的 Moodle 完整网址）",
                  "default": "https://l.xmu.edu.my"},
                 {"key": "moodle.user", "prompt": "登录用的学号 / 用户名？", "default": ""},
                 {"key": "moodle.password", "prompt": "登录密码？（输入时不显示）",
@@ -451,6 +451,11 @@ def pick_download_root(interactive=True, cfg=None):
         cs.save_config(cfg)
         return True, "下载根目录：%s" % chosen
 
+    if interactive:
+        print(_c("1", "\n  📁 课件存放目录规划指导："))
+        print(_c("90", "  推荐逻辑：选定一个「课件总目录」（如 ~/Documents/课程课件 或 ~/School）。"))
+        print(_c("90", "  系统会自动在里面为每门课建立专属子文件夹，课件和作业自动归档，无需手动整理。\n"))
+
     picked = pf.pick("课件下载到哪？", items, default_index=1)
     if not picked.get("path"):
         return False, "没选，先跳过（以后：mk set 下载目录）"
@@ -465,7 +470,7 @@ def pick_download_root(interactive=True, cfg=None):
     cs.save_config(cfg)
     print("  ✅ 下载根目录：%s" % pf._short(root))
 
-    ok2, msg2 = pick_course_dirs(root, interactive=True, cfg=cfg)
+    ok2, msg2 = pick_course_dirs(root, interactive=interactive, cfg=cfg)
     return True, msg2
 
 
@@ -475,6 +480,28 @@ def pick_course_dirs(root, interactive=True, cfg=None):
     courses = cs.load_courses()
     if not courses:
         return True, "还没选课，跳过每门课的文件夹（以后：mk add）"
+
+    if interactive:
+        print(_c("1", "\n  📁 课程专属子文件夹规划："))
+        print(_c("90", "  系统已为你规划好以下存放位置（下载时自动建立）："))
+        for key in sorted(courses):
+            c = courses[key]
+            name = c.get("name") or key
+            target = os.path.join(root, name)
+            print("    · %s  →  %s" % (name, pf._short(target)))
+        print()
+        ans = input(_c("36", "? ") + "按【回车】一键应用推荐结构（省心）；若想逐门自定义不同位置请输入 c：\n  ").strip().lower()
+        if ans not in ("c", "custom", "自定义"):
+            lines = []
+            for key in sorted(courses):
+                c = courses[key]
+                name = c.get("name") or key
+                target = os.path.join(root, name)
+                c["path"] = str(target)
+                os.makedirs(str(target), exist_ok=True)
+                lines.append("%s → %s" % (name, pf._short(target)))
+            cs.save_courses(courses)
+            return True, "已自动建立每门课的文件夹：\n     " + "\n     ".join(lines)
 
     dirs = pf.scan_dirs([root] + ps.default_scan_roots(), depth=3)
     used, lines = set(), []
@@ -515,8 +542,8 @@ def pick_course_dirs(root, interactive=True, cfg=None):
 
 # ── 定时任务安装 ───────────────────────────────────────────────────────────
 def _runner_command():
-    return "%s %s" % (sys.executable or "python3",
-                      os.path.join(os.path.dirname(os.path.abspath(__file__)), "moodle_prep.py"))
+    return ps.command_line([sys.executable or "python3",
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)), "moodle_prep.py")])
 
 
 def install_schedule(kind="auto"):

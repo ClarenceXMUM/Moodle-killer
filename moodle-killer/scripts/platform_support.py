@@ -15,8 +15,10 @@
 """
 from __future__ import annotations
 
+import base64
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -325,10 +327,17 @@ def _win_quote(s: str) -> str:
     return '"%s"' % s
 
 
+def command_line(argv) -> str:
+    """生成定时器要执行的命令，路径里的空格必须保留在同一个参数里。"""
+    if is_windows():
+        return subprocess.list2cmdline([str(arg) for arg in argv])
+    return shlex.join([str(arg) for arg in argv])
+
+
 def _launchd_plist(times, cmd, log) -> dict:
     return {
         "Label": LAUNCHD_LABEL,
-        "ProgramArguments": ["/bin/bash", "-lc", "%s >> %s 2>&1" % (cmd, log)],
+        "ProgramArguments": ["/bin/bash", "-c", cmd],
         "StartCalendarInterval": [{"Hour": int(t.split(":")[0]), "Minute": int(t.split(":")[1])}
                                   for t in times],
         "RunAtLoad": False,
@@ -391,7 +400,9 @@ def _install_cron(times, cmd, log) -> tuple:
     lines = [ln for ln in existing.splitlines() if "moodle_prep.py" not in ln]
     for t in times:
         hh, mm = t.split(":")
-        lines.append("%s %s * * * %s >> %s 2>&1" % (mm, hh, cmd, log))
+        # cron 即便在引号内也解释 %，须在送入 crontab 前转义。
+        job = "%s >> %s 2>&1" % (cmd, shlex.quote(str(log)))
+        lines.append("%s %s * * * %s" % (mm, hh, job.replace("%", "\\%")))
     try:
         p = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n",
                            capture_output=True, text=True)
@@ -404,23 +415,25 @@ def _install_cron(times, cmd, log) -> tuple:
 
 def _install_schtasks(times, cmd, log) -> tuple:
     """Windows：一个时间点一个计划任务（任务名带时间，方便重装时覆盖）。"""
-    ok_any, msgs = False, []
+    ok_all, msgs = True, []
     for t in times:
         name = "MoodleKiller-%s" % t.replace(":", "")
-        tr = "%s >> %s 2>&1" % (cmd, log)
+        # 计划任务不解释 shell 重定向，必须由 cmd.exe 接管。
+        tr = 'cmd.exe /d /s /c "%s >> %s 2>&1"' % (cmd, _win_quote(str(log)))
         try:
             p = subprocess.run(
                 ["schtasks", "/Create", "/F", "/SC", "DAILY", "/TN", name,
                  "/TR", tr, "/ST", t],
                 capture_output=True, text=True, timeout=60)
             if p.returncode == 0:
-                ok_any = True
                 msgs.append("已建计划任务 %s（每天 %s）" % (name, t))
             else:
+                ok_all = False
                 msgs.append("建 %s 失败：%s" % (name, (p.stderr or p.stdout or "").strip()))
         except Exception as e:
+            ok_all = False
             msgs.append("建 %s 失败：%s" % (name, e))
-    if not ok_any:
+    if not ok_all:
         return False, "；".join(msgs)
     return True, "已挂到 Windows 任务计划程序：%s" % "；".join(msgs)
 
@@ -505,28 +518,86 @@ def manual_hint() -> str:
 
 
 # ── 本地通知 ───────────────────────────────────────────────────────────────
+def configure_console():
+    """Windows 重定向输出也用 UTF-8；捕获输出的测试流可能没有 reconfigure。"""
+    if sys.platform.startswith("win"):
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (AttributeError, OSError, ValueError):
+                pass
+
+
+def _powershell_command(script):
+    # EncodedCommand 避免中文代码页和命令行引号破坏通知正文。
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+            "-EncodedCommand", encoded]
+
+
+def _notify_windows(title, text):
+    """优先 Toast；托盘图标的短暂存活放在独立进程，不等用户关闭通知。"""
+    values = "$title='%s'; $body='%s'; " % (title.replace("'", "''"), text.replace("'", "''"))
+    toast = values + """
+$ErrorActionPreference = 'Stop'
+try {
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null
+    [Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null
+    $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+    $nodes = $xml.GetElementsByTagName('text')
+    $nodes.Item(0).AppendChild($xml.CreateTextNode($title)) | Out-Null
+    $nodes.Item(1).AppendChild($xml.CreateTextNode($body)) | Out-Null
+    $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+    $app = '{1D83EE9B-2244-4E70-B1F5-5393042AF1E4}\\WindowsPowerShell\\v1.0\\powershell.exe'
+    $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app)
+    if ($notifier.Setting -ne 0) { exit 1 }
+    $notifier.Show($toast)
+} catch { exit 1 }
+"""
+    try:
+        p = subprocess.run(_powershell_command(toast), capture_output=True, timeout=10)
+        if p.returncode == 0:
+            return True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    balloon = values + """
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$icon = New-Object System.Windows.Forms.NotifyIcon
+try {
+    $icon.Icon = [System.Drawing.SystemIcons]::Information
+    $icon.BalloonTipTitle = $title
+    $icon.BalloonTipText = $body
+    $icon.Visible = $true
+    $icon.ShowBalloonTip(5000)
+    Start-Sleep -Seconds 6
+} finally { $icon.Dispose() }
+"""
+    # 子进程自行退出，避免继承 cron 的输出管道而拖住调用方。
+    subprocess.Popen(_powershell_command(balloon), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return True
+
+
 def notify(title, text) -> bool:
     """弹一条本机通知（失败不影响主流程）。"""
     title = title or "Moodle-killer"
     safe = (text or "").replace("\n", " ")[:200]
     try:
         if is_mac():
-            s = safe.replace('"', "'")
-            t = title.replace('"', "'")
-            subprocess.run(["osascript", "-e",
+            s = safe.replace("\\", "\\\\").replace('"', '\\"')
+            t = title.replace("\\", "\\\\").replace('"', '\\"')
+            p = subprocess.run(["osascript", "-e",
                             'display notification "%s" with title "%s"' % (s, t)],
-                           check=False, timeout=10)
-            return True
+                           capture_output=True, timeout=10)
+            return p.returncode == 0
         if is_windows():
-            ps = ("[reflection.assembly]::loadwithpartialname('System.Windows.Forms');"
-                  "[System.Windows.Forms.MessageBox]::Show('%s','%s')"
-                  % (safe.replace("'", "''"), title.replace("'", "''")))
-            subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           check=False, timeout=20)
-            return True
+            return _notify_windows(title, safe)
         if shutil.which("notify-send"):
-            subprocess.run(["notify-send", title, safe], check=False, timeout=10)
-            return True
+            p = subprocess.run(["notify-send", title, safe], capture_output=True, timeout=10)
+            return p.returncode == 0
     except Exception:
         pass
     return False

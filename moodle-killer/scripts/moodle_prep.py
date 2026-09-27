@@ -21,6 +21,8 @@ stdout 是给 cron / Agent 读的紧凑文本。输出风格由 config.yaml 的 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
 import json
 import os
 import re
@@ -31,6 +33,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import platform_support as ps
+ps.configure_console()
 
 try:
     import config_store as cs
@@ -77,6 +81,36 @@ def parse_due(s):
             return datetime.strptime(s, f)
         except ValueError:
             continue
+    # Moodle 中文界面及数字日期；只在日期、时间完整时解释，坏日期不猜。
+    m = re.search(r"(?<!\d)(\d{4})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*"
+                  r"(\d{1,2})\s*日?\s*(?:[,，T]|星期[一二三四五六日天]|周[一二三四五六日天]|\s)*"
+                  r"(上午|下午)?\s*(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)", s)
+    if m:
+        year, month, day, period, hour, minute = m.groups()
+        hour = int(hour)
+        if period:
+            if not 1 <= hour <= 12:
+                return None
+            hour = hour % 12 + (12 if period == "下午" else 0)
+        try:
+            return datetime(int(year), int(month), int(day), hour, int(minute))
+        except ValueError:
+            return None
+    # 英文月份不依赖操作系统 locale（中文 Windows 的 %B 不一定认 September）。
+    m = re.search(r"\b(\d{1,2})\s+([A-Za-z]+)\s+(\d{4}),?\s+(\d{1,2}):(\d{2})\s*(AM|PM)?\b",
+                  s, re.IGNORECASE)
+    if m:
+        day, month, year, hour, minute, period = m.groups()
+        months = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+        try:
+            hour = int(hour)
+            if period:
+                if not 1 <= hour <= 12:
+                    return None
+                hour = hour % 12 + (12 if period.lower() == "pm" else 0)
+            return datetime(int(year), months.index(month.lower()[:3]) + 1, int(day), hour, int(minute))
+        except ValueError:
+            return None
     return None
 
 
@@ -130,47 +164,62 @@ def collect(scanner, courses, cfg, do_download=True):
             items.append({"bucket": bucket, "text": "[%s] 通知: %s" % (BUCKET_LABEL[bucket], n),
                           "course": "通知", "title": n})
 
-    for key, info in courses.items():
-        name = info.get("name", key)
-        scan_expect.append(name.split(" ")[0])
-        if info.get("mute"):
-            continue
+    active_courses = [(key, info) for key, info in courses.items() if not info.get("mute")]
+
+    def _scan_one(k, inf):
+        cname = inf.get("name", k)
+        exp_lbl = cname.split(" ")[0]
         try:
-            r = scanner.scan_course(info["id"], name,
-                                    download=do_download,
-                                    download_dir=info.get("path", "."))
-            scan_ok.append(name.split(" ")[0])
-            for fname in r.get("new_files", []):
-                tail = "已下载" if do_download else "（试跑：未下载）"
-                items.append({"bucket": "DOWNLOAD",
-                              "text": "[新文件] %s: %s %s" % (name, fname, tail),
-                              "course": name, "title": fname})
-            for a_id, a in r.get("assignments", {}).items():
-                aname = a.get("name", "作业")
-                due = (a.get("due") or "").strip()
-                status = a.get("status", "") or ""
-                graded = a.get("graded", "") or ""
-                if "已提交" in status or "已交" in status or "submitted" in status.lower():
-                    continue
-                if graded and graded not in ("未评分", "") and "未" not in str(graded):
-                    items.append({"bucket": "GRADE",
-                                  "text": "[成绩] %s: %s %s" % (name, aname, graded),
-                                  "course": name, "title": aname, "graded": graded})
-                    continue
-                if due or (status and status not in ("未知", "")):
-                    due_dt = parse_due(due) if due else None
-                    if due_dt:
-                        tail = " 截止 %s (%s)" % (due_dt.strftime("%m/%d %H:%M"), countdown(due_dt))
-                    elif due:
-                        tail = " 截止 %s" % due
-                    else:
-                        tail = ""
-                    items.append({"bucket": "NEW_ASSIGNMENT",
-                                  "text": "[新作业] %s: %s%s" % (name, aname, tail),
-                                  "course": name, "title": aname,
-                                  "due_dt": due_dt.strftime("%Y-%m-%d %H:%M") if due_dt else None})
-        except Exception as e:
-            notes.append("扫描失败 %s: %s" % (key, e))
+            res = scanner.scan_course(inf["id"], cname,
+                                      download=do_download,
+                                      download_dir=inf.get("path", "."))
+            return (k, cname, exp_lbl, res, None)
+        except Exception as ex:
+            return (k, cname, exp_lbl, None, ex)
+
+    if len(active_courses) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(active_courses))) as executor:
+            futures = [executor.submit(_scan_one, k, inf) for k, inf in active_courses]
+            scan_results = [f.result() for f in futures]
+    else:
+        scan_results = [_scan_one(k, inf) for k, inf in active_courses]
+
+    for key, name, exp_lbl, r, err in scan_results:
+        scan_expect.append(exp_lbl)
+        if err is not None:
+            notes.append("扫描失败 %s: %s" % (key, err))
+            continue
+        scan_ok.append(exp_lbl)
+        notes.extend(r.get("notes", []))
+        for fname in r.get("new_files", []):
+            tail = "已下载" if do_download else "（试跑：未下载）"
+            items.append({"bucket": "DOWNLOAD",
+                          "text": "[新文件] %s: %s %s" % (name, fname, tail),
+                          "course": name, "title": fname})
+        for a_id, a in r.get("assignments", {}).items():
+            aname = a.get("name", "作业")
+            due = (a.get("due") or "").strip()
+            status = a.get("status", "") or ""
+            graded = a.get("graded", "") or ""
+            if "已提交" in status or "已交" in status or "submitted" in status.lower():
+                continue
+            if graded and graded not in ("未评分", "") and "未" not in str(graded):
+                items.append({"bucket": "GRADE",
+                              "text": "[成绩] %s: %s %s" % (name, aname, graded),
+                              "course": name, "title": aname, "graded": graded})
+                continue
+            if due or (status and status not in ("未知", "")):
+                due_dt = parse_due(due) if due else None
+                if due_dt:
+                    tail = " 截止 %s (%s)" % (due_dt.strftime("%m/%d %H:%M"), countdown(due_dt))
+                elif due:
+                    tail = " 截止 %s" % due
+                else:
+                    tail = ""
+                items.append({"bucket": "NEW_ASSIGNMENT",
+                              "text": "[新作业] %s: %s%s" % (name, aname, tail),
+                              "course": name, "title": aname,
+                              "due_dt": due_dt.strftime("%Y-%m-%d %H:%M") if due_dt else None})
 
     # 去重（同一条文本只留一次）
     seen, deduped = set(), []
@@ -205,6 +254,8 @@ def select(items, mode, max_lines):
         return keep[:max_lines] if max_lines else keep, []
     if mode == "full":
         return items, []
+    if max_lines and mode in ("heartbeat", "digest"):
+        return items[:max(0, max_lines - 1)], []
     return items[:max_lines] if max_lines else items, []
 
 
@@ -267,21 +318,18 @@ def main(argv=None):
         print("❌ 还没选课。跑 `mk add` 或 `mk setup`", file=sys.stderr)
         return 2
 
-    if cs.get_path(cfg, "advanced.paused") and not args.dry_run:
-        _write_last_run(out_dir, started, "paused", [], mode)
-        if not args.quiet:
-            print("[Moodle] 已暂停推送（mk resume 恢复）", file=sys.stderr)
-        return 0
-
     try:
         scanner = MoodleClient()
     except SystemExit as e:
         print(str(e), file=sys.stderr)
         return 2
 
-    if not scanner.login():
+    with contextlib.redirect_stdout(sys.stderr if args.json else sys.stdout):
+        logged_in = scanner.login()
+    if not logged_in:
         print("❌ 登录失败：账号或密码不对（mk doctor 看怎么修）", file=sys.stderr)
-        _write_last_run(out_dir, started, "login_failed", [], mode)
+        if not args.dry_run:
+            _write_last_run(out_dir, started, "login_failed", [], mode)
         return 2
 
     if args.dry_run:
@@ -296,11 +344,15 @@ def main(argv=None):
             os.makedirs(dry, exist_ok=True)
         scanner.state_dir = str(dry)
 
-    items, unclassified, meta = collect(
-        scanner, courses, cfg, do_download=not (args.dry_run or args.no_download))
+    with contextlib.redirect_stdout(sys.stderr if args.json else sys.stdout):
+        items, unclassified, meta = collect(
+            scanner, courses, cfg, do_download=not (args.dry_run or args.no_download))
 
     shown, _extra = select(items, mode, max_lines)
     lines = render(mode, shown, meta, cfg, out_dir)
+    if mode != "full":
+        # 心跳/日报标题也计入五行契约。
+        lines = lines[:max_lines]
 
     # 落盘
     (out_dir / "signals.txt").write_text("\n".join(it["text"] for it in shown), encoding="utf-8")
@@ -316,10 +368,35 @@ def main(argv=None):
         "风格: %s ｜ 输出 %d 行" % (mode, len(lines)),
     ]
     if meta["notes"]:
-        verify_report.append("异常: " + "; ".join(meta["notes"]))
+        verify_report.append("异常: ❌ " + "; ".join(meta["notes"]))
+
+    # 先校验再投递。JSON 只是输出格式，不能绕过真实运行的发送步骤。
+    status, exit_code = "ok", 0
+    delivery = "试跑，不发送" if args.dry_run else "无内容，未发送"
+    if meta["missing"] or meta["notes"]:
+        status, exit_code = "scan_failed", 2
+        delivery = "❌ 扫描校验失败，未发送"
+    elif not args.dry_run:
+        import sender
+        channel, _why = sender.detect_channel(cfg)
+        if cs.get_path(cfg, "advanced.paused"):
+            status, delivery = "paused", "已暂停推送"
+        elif not cs.get_path(cfg, "delivery.weekend") and started.weekday() >= 5:
+            delivery = "周末不推送"
+        elif channel == "none":
+            delivery = "通道 none，未发送"
+        elif lines and lines != ["[SILENT]"]:
+            sent, delivery = sender.send_text("\n".join(lines), title="Moodle 学业提醒",
+                                              channel=channel, cfg=cfg)
+            if not sent:
+                status, exit_code = "send_failed", 1
+                delivery = "❌ " + delivery
+    verify_report.append("投递: " + delivery)
     (out_dir / "verify_report.txt").write_text("\n".join(verify_report), encoding="utf-8")
     if not args.dry_run:
-        _write_last_run(out_dir, started, "ok", shown, mode)
+        _write_last_run(out_dir, started, status, shown, mode, delivery)
+    if exit_code:
+        print(delivery, file=sys.stderr)
 
     if args.json:
         print(json.dumps({
@@ -330,8 +407,10 @@ def main(argv=None):
             "unclassified": len(unclassified),
             "verify": verify_report,
             "dry_run": args.dry_run,
+            "delivery": delivery,
+            "status": status,
         }, ensure_ascii=False, indent=2))
-        return 0
+        return exit_code
 
     if lines:
         if mode == "silent":
@@ -347,17 +426,17 @@ def main(argv=None):
         print("[兜底] %d 条需 Agent 读取 out/unclassified_moodle.json" % len(unclassified))
     if meta["missing"] and mode != "silent":
         print("# 校验：" + course_check)
-    return 0
+    return exit_code
 
 
-def _write_last_run(out_dir, started, status, shown, mode):
+def _write_last_run(out_dir, started, status, shown, mode, delivery=""):
     try:
         (out_dir / "last_run.json").write_text(json.dumps({
             "time": started.strftime("%Y-%m-%d %H:%M"),
             "status": status,
             "mode": mode,
             "signals": len(shown),
-            "summary": "推送 %d 条" % len(shown) if status == "ok" else status,
+            "summary": delivery or status,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass

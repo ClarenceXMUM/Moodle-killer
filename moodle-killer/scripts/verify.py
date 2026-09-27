@@ -16,6 +16,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import platform_support as ps
+ps.configure_console()
 
 
 def check_login(logged_in, hint=""):
@@ -132,7 +134,7 @@ def check_self():
     except Exception as e:
         checks.append((False, "harness_install 出错：%s" % e))
 
-    shim = Path(os.path.expanduser("~/.local/bin/mk"))
+    shim = ps.shim_path()
     checks.append((shim.exists(),
                    "命令 mk %s（%s）" % ("已就位" if shim.exists() else "还没装 → ./install.sh", shim)))
 

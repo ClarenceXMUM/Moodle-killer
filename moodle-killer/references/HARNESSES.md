@@ -79,6 +79,33 @@ mk doctor          # 体检
 
 ---
 
+## 远程控制对话端免配推送（Agent 定时任务 Prompt）
+
+如果你平时通过 **Telegram / WhatsApp / Discord / 网页端** 与你的 Agent（Hermes、OpenClaw、Claude Code、豆包 等）保持远程对话，你**完全不需要**配置外部复杂 Webhook 或 Bot Token。
+
+直接在你的 Agent 框架里建立一个定时任务（例如 Hermes 的 cron、各平台的 `/schedule`），填入以下 Prompt：
+
+```text
+你是我的 Moodle 学业助理。请按以下流程检查并汇报我今日的最新学业动态：
+
+1. 检查动态：
+   执行命令：python3 -c "import sys, os; sys.path.insert(0, os.path.expanduser('~/.agents/skills/moodle-killer/scripts')); import moodle_prep; moodle_prep.main([])"
+   （如果终端已安装 mk 命令，也可直接执行：mk）
+
+2. 处理输出与兜底：
+   - 提取命令输出的信号列表以及 ~/.moodle-killer/out/signals.txt。
+   - 若 ~/.moodle-killer/out/unclassified_moodle.json 有未命中项，参考 ~/.moodle-killer/user_requirements.md 快速裁决：仅保留“明天早上看到仍有行动价值”的学业事项。
+
+3. 输出要求（直接在当前对话端回复我）：
+   - 若有新作业、新文件、新成绩或到期倒计时：直接输出整理好的高密度信号（每行严格遵守 [分类] 课程: 内容 格式，≤5 行，零寒暄、零多余客套话）。
+   - 若输出为 [SILENT] 或无新内容且非 heartbeat 模式：严格保持静默，不要发送任何消息。
+   - 若扫描出现错误（❌）：必须原样透出错误详情，提醒我检查网络或重新登录。
+```
+
+> 提示：在命令行执行 `mk prompt` 可随时一键复制这段 Prompt。
+
+---
+
 ## 卸载
 
 ```bash

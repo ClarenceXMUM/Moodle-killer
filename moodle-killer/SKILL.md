@@ -27,6 +27,9 @@ mk output silent            # 换推送风格
 mk add 数学分析             # 加一门课
 mk find 概率                # 忘了文件夹在哪，让它帮你找
 mk doctor                   # 出问题先跑这个
+mk channel test             # 实际发送一条测试消息，检查当前通道
+mk send "测试消息"           # 用当前通道发送指定文字
+mk prompt                   # 查看/复制给 Agent 定时任务的远程对话 Prompt
 mk sandbox                  # 造个干净环境测，不碰你现有配置
 ```
 

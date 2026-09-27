@@ -20,6 +20,7 @@ import os
 import shutil
 import sys
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config_store as cs  # noqa: E402
@@ -123,15 +124,28 @@ def _prune_other_copies(keep):
     return removed
 
 
+def get_source_dir():
+    info = load_install_json()
+    orig = info.get("skill_dir")
+    if orig and os.path.isdir(orig):
+        return Path(orig)
+    return cs.SKILL_DIR
+
+
 # ── 安装 ───────────────────────────────────────────────────────────────────
 def _copy_bundle(dest):
     """整包复制（缺一个文件就等于装了个空壳，所以必须整包）。"""
+    src_dir = get_source_dir()
+    if os.path.realpath(str(src_dir)) == os.path.realpath(str(dest)):
+        return []
     os.makedirs(dest, exist_ok=True)
     for item in BUNDLE_ITEMS:
-        src = os.path.join(SRC, item)
+        src = os.path.join(src_dir, item)
         if not os.path.exists(src):
             continue
         dst = os.path.join(dest, item)
+        if os.path.realpath(src) == os.path.realpath(dst):
+            continue
         if os.path.isdir(src):
             if os.path.exists(dst):
                 shutil.rmtree(dst)
