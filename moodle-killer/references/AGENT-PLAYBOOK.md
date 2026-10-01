@@ -29,12 +29,19 @@ mk doctor          # 如果有问题，这里直接说哪坏了
 | 「只要紧急的」 | `output.mode=urgent` | `mk output urgent` |
 | 「每天给我一条汇总」 | `output.mode=digest` | `mk output digest` |
 | 「暂停几天」 | `advanced.paused=true` | `mk pause`（脚本照跑，只是不推） |
-| 「加一门课」 | `courses.json` | `mk add 课程名` |
-| 「这门课别推了」 | 该课的 mute 标记 | `mk mute 课程名` |
+| 「加一门课」 | `courses.json` | `mk add 课程名`（本学期在 Moodle 上选了的课**下次扫描会自动接上**，不用手加） |
+| 「加完课要做的事」 | `code` / `code_source` | **跑 `mk code --apply`**：把课程代号查证齐（Moodle 官方编号 → 课名 → syllabus 的 Course Code → Teams 交叉验证）。setup 阶段没攒够，后面文件夹名/文件名就只能退化成课名 |
+| 「换学期了 / 把上学期的课清掉」 | `courses.json` | `mk new`（预览）→ `mk new --yes`（执行）。判据 = Moodle 的 `inprogress` 分类；摘课只取消盯课，文件与 state 保留 |
+| 「这门课别推了」 | 该课的 mute 标记 | `mk mute 课程名`（仍在盯，只是不推） |
+| 「这门课以后都别盯了」 | 从 `courses.json` 摘掉 + 「不再自动接上」名单 | `mk rm 课程名`（否则自动接课会把它接回来；恢复：`mk add`） |
+| 「文件夹名字太长 / 想要「课程代号+名称」」 | `download.folder_template` | `mk folder "{code} {name}"` → 真要改现有的再 `mk folder --apply`（先备份配置，冲突/目标已存在会跳过） |
 | 「下载存到某个目录」（说不清路径） | `download.root` | **`mk find`** —— 扫一遍你电脑，列编号让你挑 |
 | 「下载存到 D 盘/某个目录」 | `download.root` | `mk set 下载目录 ~/School` |
 | 「文件到底下到哪去了」 | — | `mk find 关键词`（如 `mk find 概率`） |
 | 「课件和作业分开放」 | `download.by_type=true` | `mk set --advanced` 看高级项，或 `mk set 按类型 true` |
+| 「下载的文件名看不懂 / 想要带课号」 | `download.naming` | `mk naming`（拿你自己的课演示）→ `mk naming default` / `plain` / `original` / `custom` |
+| 「想要文件名带日期/类型」 | `download.name_template` | `mk set 命名 custom` + `mk set 命名模板 "{code}-{date}-{name}"` |
+| 「课号不对 / 这门课不是 MAT 开头」 | 该课的 `code` | 在 `courses.json` 那门课里加 `"code": "你想用的"`（手填优先） |
 | 「换账号 / 密码错了」 | `moodle.user` / `moodle.password` | `mk setup` 重问第 1 块，或 `mk set 密码 xxx` |
 | 「什么该推什么不该推」 | `user_requirements.md` | 见下面第三节 |
 | 「加个关键词规则」 | 脚本里的 `RULES` | 见下面第四节 |

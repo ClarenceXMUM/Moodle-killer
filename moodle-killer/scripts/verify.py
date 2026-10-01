@@ -120,7 +120,7 @@ def check_self():
 
     for f in ("mk.py", "moodle_prep.py", "moodle_client.py", "sender.py",
               "onboarding.py", "harness_install.py", "config_store.py",
-              "platform_support.py", "pathfinder.py", "sandbox.py"):
+              "platform_support.py", "pathfinder.py", "course_code.py"):
         checks.append(((HERE / f).exists(), "脚本存在：%s" % f))
 
     try:

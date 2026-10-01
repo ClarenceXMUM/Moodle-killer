@@ -133,9 +133,9 @@ def get_source_dir():
 
 
 # ── 安装 ───────────────────────────────────────────────────────────────────
-def _copy_bundle(dest):
+def _copy_bundle(dest, src_dir=None):
     """整包复制（缺一个文件就等于装了个空壳，所以必须整包）。"""
-    src_dir = get_source_dir()
+    src_dir = src_dir or get_source_dir()
     if os.path.realpath(str(src_dir)) == os.path.realpath(str(dest)):
         return []
     os.makedirs(dest, exist_ok=True)
@@ -176,12 +176,17 @@ def install(targets=None, all_harnesses=False, project=False):
 
     installed_dirs = []
     done_real = set()
+    # 源头只认一次并原样记回 install.json。**不能记 SRC**：`mk` 是从某个安装副本
+    # 跑起来的，SRC 就是那个副本；拿它当源头，第二次 `mk install` 就会「副本 → 副本」
+    # 互相同步，仓库里改的 references/SKILL.md 永远传不出去（scripts 看着像同步了，
+    # 其实只是两边都碰巧是新版）。
+    src_dir = get_source_dir()
     for dest in _target_dirs(project=project):
         real = os.path.realpath(dest)
         if real in done_real:
             continue
         try:
-            missing = _copy_bundle(dest)
+            missing = _copy_bundle(dest, src_dir=src_dir)
             if missing:
                 print("  ❌ %s：复制后缺 %s" % (dest, "、".join(missing)))
                 continue
@@ -200,7 +205,7 @@ def install(targets=None, all_harnesses=False, project=False):
                 print("     - %s" % g)
 
     if installed_dirs:
-        _write_install_json(installed_dirs)
+        _write_install_json(installed_dirs, src_dir=src_dir)
         shim = _make_shim(installed_dirs[0])
         if shim:
             print("  ✅ 命令 mk → %s" % shim)
@@ -213,9 +218,9 @@ def install(targets=None, all_harnesses=False, project=False):
     return 0
 
 
-def _write_install_json(dirs):
+def _write_install_json(dirs, src_dir=None):
     info = {
-        "skill_dir": str(SRC),
+        "skill_dir": str(src_dir or get_source_dir()),
         "harnesses": list(PRIMARY_ORDER),
         "dirs": [str(d) for d in dirs],
         "installed_at": datetime.now().isoformat(timespec="seconds"),

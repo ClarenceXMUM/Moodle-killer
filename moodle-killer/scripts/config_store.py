@@ -65,6 +65,9 @@ DEFAULTS = {
         "root": "",                     # 空 = 用本系统的习惯位置（见 platform_support.default_download_root）
         "per_course": True,
         "by_type": False,               # 高级：按文件类型再分一层
+        "naming": "default",            # default|plain|original|custom（见 moodle_client.build_filename）
+        "name_template": "{code}-{name}",   # 仅 custom 用；default 等价于这个模板
+        "folder_template": "{code} {name}",  # 课程文件夹怎么命名（字段见 FOLDER_FIELDS）
         "type_map": {
             "Assignment": ["assignment", "homework", "作业", "tutorial"],
             "Slides": ["slide", "lecture", "chapter", "笔记"],
@@ -81,6 +84,10 @@ DEFAULTS = {
         "verify_strict": True,          # 校验不过就不推
         "keep_days": 30,                # 状态文件保留天数（0=永久）
         "paused": False,                # 暂停推送（脚本照跑，不推送）
+    },
+    "completion": {
+        "mark_done": True,              # 下载成功的活动自动勾上 Moodle 的 Done（保持课程进度）
+        "max_marks": 15,                # 单轮最多勾几条；超过就一条都不勾，先报给用户确认
     },
 }
 
@@ -106,6 +113,13 @@ KEY_META = {
     "download.root": dict(label="下载根目录", type="path", example=ps.path_example()),
     "download.per_course": dict(label="每门课一个文件夹", type="bool"),
     "download.by_type": dict(label="按文件类型再分文件夹（高级）", type="bool", advanced=True),
+    "download.naming": dict(label="下载文件怎么命名", type="choice",
+                            choices=["default", "plain", "original", "custom"],
+                            example="mk set 命名 默认 ｜ mk set 命名 custom ｜ mk set 命名模板 \"{code}-{date}-{name}\""),
+    "download.folder_template": dict(label="课程文件夹命名模板", type="str",
+                                     example="{code} {name} 或 {code} {name} {semester}"),
+    "download.name_template": dict(label="自定义命名模板（naming=custom 时生效）", type="str",
+                                   example="{code}-{name}"),
     "output.mode": dict(label="输出风格", type="choice",
                         choices=["heartbeat", "silent", "digest", "urgent", "full"]),
     "output.max_lines": dict(label="单次最多几行", type="int"),
@@ -113,6 +127,10 @@ KEY_META = {
     "advanced.verify_strict": dict(label="校验不过就不推（高级）", type="bool", advanced=True),
     "advanced.keep_days": dict(label="状态保留天数（高级）", type="int", advanced=True),
     "advanced.paused": dict(label="暂停推送（高级）", type="bool", advanced=True),
+    "completion.mark_done": dict(label="下载后自动勾 Done（保持课程进度）", type="bool",
+                                 advanced=True),
+    "completion.max_marks": dict(label="单轮最多勾几条（超过就一条都不勾）", type="int",
+                                 advanced=True),
 }
 
 # 说人话就能改：别名 → 配置键
@@ -126,6 +144,12 @@ KEY_ALIASES = {
     "folder": "download.root", "下载目录": "download.root", "目录": "download.root",
     "下载到": "download.root", "root": "download.root",
     "bytype": "download.by_type", "分类": "download.by_type", "按类型": "download.by_type",
+    "naming": "download.naming", "命名": "download.naming", "自动命名": "download.naming",
+    "文件名": "download.naming", "文件命名": "download.naming", "怎么命名": "download.naming",
+    "template": "download.name_template", "name_template": "download.name_template",
+    "模板": "download.name_template", "命名模板": "download.name_template",
+    "文件夹": "download.folder_template", "文件夹命名": "download.folder_template",
+    "文件夹模板": "download.folder_template", "folder_template": "download.folder_template",
     "url": "moodle.url", "站点": "moodle.url", "网站": "moodle.url",
     "user": "moodle.user", "账号": "moodle.user", "学号": "moodle.user",
     "password": "moodle.password", "密码": "moodle.password",
@@ -143,6 +167,13 @@ MODE_LABELS = {
     "digest": "每天一份汇总",
     "urgent": "只报紧急",
     "full": "全都报",
+}
+
+NAMING_LABELS = {
+    "default": "课程代号-文件名（MAT203-Animals.txt）",
+    "plain": "只用文件名（Animals.txt）",
+    "original": "Moodle 原始名（资料夹文件带 ID 和摘要）",
+    "custom": "按你的模板（download.name_template）",
 }
 
 CHANNEL_LABELS = {
@@ -286,6 +317,213 @@ def download_root(cfg=None) -> str:
     return ps.default_download_root()
 
 
+# ── 新课落地到哪里 ─────────────────────────────────────────────────────────
+_STOPWORDS = {"and", "the", "for", "with", "from", "general", "class", "course", "courses",
+              "introduction", "intro", "module", "modules", "section", "part", "test", "exam"}
+
+
+def _significant_words(text):
+    """课名里的实词：英文取 ≥4 字母的词（去停用词），中文取 ≥2 字的连续段。
+
+    课程代号（MAT203）/年份/学期号（2027/01）都会被自然滤掉。
+    """
+    latin = {w.lower() for w in re.findall(r"[A-Za-z]{4,}", str(text or ""))
+             if w.lower() not in _STOPWORDS}
+    cjk = {w for w in re.findall(r"[\u4e00-\u9fff]{2,}", str(text or "")) if w not in _STOPWORDS}
+    return latin | cjk
+
+
+def course_key(name, cid=None):
+    """课名 → courses.json 的键（稳定、可读；同名课靠 id 兜底区分）。"""
+    key = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in (name or "").lower())
+    key = key.strip("_")[:24]
+    return key or ("course%s" % (cid or "x"))
+
+
+# ── 课程文件夹怎么命名 ─────────────────────────────────────────────────────
+# Moodle 的课名长这样：`MAT203 Statistics 2026/09 Koh Siew Khew`
+#   = 代号 + 课名 + 学期号 + 老师。把它拆成字段，用户用模板自由组合。
+_CODE_TOKEN_RE = re.compile(r"\b[A-Za-z]{2,6}[\s/-]?\d{2,4}\b")   # MAT203 / MPU1022 / MAT418
+_SEMESTER_RE = re.compile(r"\b(\d{4})\s*[/-]\s*(\d{1,2})\b")       # 2026/09
+_ILLEGAL_RE = re.compile(r'[\\/:*?"<>|]')                             # 路径里不能出现的字符
+
+FOLDER_FIELDS = {
+    "code": "课程代号：课名里的 MAT203 优先，没有就用这门课的 code（如 AAI）；都没有才为空",
+    "name": "课程名称（去掉代号 / 学期号 / 老师）",
+    "teacher": "老师（学期号后面那截，认不出就为空）",
+    "semester": "学期（2026/09 → 2026-09）",
+    "shortname": "Moodle 短名（Stat / PDEs）",
+    "fullname": "Moodle 里的原样全名",
+}
+
+
+def split_course_name(fullname, code="", shortname="", code_source=""):
+    """课名 → 可组合的字段（认不出的一律留空，绝不瞎猜）。"""
+    raw = re.sub(r"\s+", " ", str(fullname or "")).strip()
+    semester, head, tail = "", raw, ""
+    m = _SEMESTER_RE.search(raw)
+    if m:
+        semester = "%s-%02d" % (m.group(1), int(m.group(2)))
+        head = raw[:m.start()].strip(" -_,，:：")
+        tail = raw[m.end():].strip(" -_,，:：")
+    body = head
+    for tok in _CODE_TOKEN_RE.findall(body):
+        body = body.replace(tok, " ")
+    body = re.sub(r"^\s*(?:and|und|&)\s+", "", body, flags=re.IGNORECASE)   # 「MAT301 and MAT418 …」
+    body = re.sub(r"\s+", " ", body).strip(" -_,，:：/")
+    # 课程代号：只认「字母+数字」那种真代号（MAT203 / MPU1022）。
+    # Moodle 的短名（AAI / Stat / PDEs）是绰号，直接当代号会把「Abstract Algebra I」
+    # 变成「AAI Abstract Algebra I」——不是用户要的；要短名请在模板里写 {shortname}。
+    stored = str(code or "").strip()
+    # 短名（AAI / Stat / PDEs）不是代号 —— 它跟真编码（MAT211 这种）会打架。
+    # 只认「真代号的形状」或「有可信来源标注」的 code，短名一律不当代号用。
+    trusted = bool(re.fullmatch(r"[A-Za-z]{2,6}\d{2,4}", stored)) or \
+        str(code_source or "").strip() in ("manual", "idnumber", "name", "material",
+                                           "material-name", "teams")
+    if not trusted:
+        stored = ""
+    real = _CODE_TOKEN_RE.search(head) or _CODE_TOKEN_RE.search(raw)
+    if (stored and re.fullmatch(r"[A-Za-z0-9]{2,8}", stored)
+            and stored.lower() in raw.lower()):
+        # 课名里同时挂着多个代号时（实测：「MPU1022/MPU3322 …」，按入学批次分，
+        # 第一学期学的用 1022、之后几个学期用 3322），**以你在 courses.json 里指定的为准** ——
+        # Moodle 页面上没有「这个学生该用哪个」的任何来源（页面/分组/idnumber 全查过）。
+        course_code = stored
+    elif real:
+        course_code = re.sub(r"\s+", "", real.group(0))
+    elif re.fullmatch(r"[A-Za-z0-9]{2,8}", stored):
+        # 课名里没有真代号 → 用这门课自己的代号（courses.json 的 code）。
+        # 实测 XMUM 的「Abstract Algebra I 2026/09 Ali Azimi」全名没代号、官方 idnumber 也是空的，
+        # 只有短名 AAI —— 没有这一步，它永远拿不到代号（文件夹名就只能是课名本身）。
+        # 只认**单个词**：Moodle 会出现「Corruption 2026/09」这种带空格/斜杠的短名，不能塞进文件夹名。
+        course_code = stored
+    else:
+        course_code = ""
+    return {
+        "code": course_code,
+        "name": body or head,
+        "teacher": tail,
+        "semester": semester,
+        "shortname": str(shortname or "").strip(),
+        "fullname": raw,
+    }
+
+
+def check_folder_template(tpl):
+    """模板体检：字段名要认识、不能为空、至少有一个能区分课程的字段。"""
+    tpl = str(tpl or "")
+    if not tpl.strip():
+        raise ValueError("模板不能是空的")
+    unknown = sorted(set(re.findall(r"\{(\w+)\}", tpl)) - set(FOLDER_FIELDS))
+    if unknown:
+        raise ValueError("不认识的字段：%s。可用：%s"
+                         % ("、".join(unknown), " ".join("{%s}" % k for k in FOLDER_FIELDS)))
+    if not re.search(r"\{(code|name|shortname|fullname)\}", tpl):
+        raise ValueError("模板里至少要有一个能区分课程的字段（{code} / {name} / {shortname} / {fullname}），"
+                         "否则所有课会挤进同一个文件夹")
+    return tpl
+
+
+def render_folder_name(entry, template=None, cfg=None):
+    """按模板渲染出这门课的文件夹名（非法字符转义、空字段自动不占位）。"""
+    entry = entry or {}
+    if template is None:
+        cfg = cfg if cfg is not None else load_config()
+        template = get_path(cfg, "download.folder_template") or "{code} {name}"
+    fields = split_course_name(entry.get("name"), entry.get("code") or "",
+                               entry.get("shortname") or "",
+                               entry.get("code_source") or "")
+    out = str(template)
+    for key in FOLDER_FIELDS:
+        out = out.replace("{%s}" % key, fields.get(key) or "")
+    out = re.sub(r"[（(]\s*[)）]", "", out)          # 字段为空留下的空括号，别留在名字里
+    out = re.sub(r"\s+", " ", out).strip()
+    out = _ILLEGAL_RE.sub("-", out)
+    return out.strip(" .-_")
+
+
+def dir_match_score(dirname, name, code="", folder_name=""):
+    """目录名与这门课的匹配度（0~1）：模板名一致 = 1.0；含课程代号 = 1.0；否则看实词命中率。
+
+    英文要命中 ≥2 个实词（单个 analysis 会误撞别的课）；中文一个 ≥2 字的词就够。
+    """
+    low = str(dirname or "").lower()
+    if folder_name and low == str(folder_name).lower():
+        return 1.0
+    code_up = str(code or "").strip().upper()
+    if code_up and code_up.lower() in low:
+        return 1.0
+    words = _significant_words(name)
+    if not words:
+        return 0.0
+    hit_latin = [w for w in words if w[0].isascii() and w in low]
+    hit_cjk = [w for w in words if not w[0].isascii() and w in low]
+    if len(hit_latin) < 2 and not hit_cjk:
+        return 0.0
+    return (len(hit_latin) + len(hit_cjk)) / float(len(words))
+
+
+def seen_course_dirs(courses, teams_sources=None):
+    """现有课程/来源各自占用的目录 → [(规范化路径, 课程代号)]，给 guess_course_dir 当「已占用」清单。"""
+    out = []
+    for info in list((courses or {}).values()) + list((teams_sources or {}).values()):
+        if isinstance(info, dict) and info.get("path"):
+            out.append((os.path.normpath(str(info["path"])), (info.get("code") or "").strip().upper()))
+    return out
+
+
+def guess_course_dir(courses, cfg, name, code="", teams_sources=None, taken=(), folder_name=""):
+    """给刚接上的新课猜一个落地目录（**只算路径，不建目录、不写配置**）。
+
+    规则（站在「用户其实已经建好文件夹」这个现实上）：
+      1. 基准目录 = 现有课程/来源路径里出现最多的父目录（实践中就是 `Knowledge/`）；
+         一门都没有 → 退回 `download.root`。
+      2. 基准目录下已经有像这门的文件夹 → 复用。判「像」：目录名含**这门课的代号**，
+         或课名实词命中 ≥2 个（且过半）——单个词命中不算，否则
+         「MAT303 Real Analysis」会撞上「MAT201 Mathematical Analysis 1」。
+      3. **已被另一门课占用的目录不复用**（代号不同即另一门；代号相同 = 同一门课换学期，允许）。
+         否则「Anti-Corruption」的目录会被下学期的「Anti-Corruption II」悄悄接手。
+      4. 都不像 → 基准目录/课名（与 `mk add` 同一套，只是根从 School 换成课都在的地方）。
+    """
+    code_up = (code or "").strip().upper()
+    taken = {os.path.normpath(p): (c or "") for p, c in taken}
+
+    def blocked(path):
+        owner = taken.get(os.path.normpath(path))
+        if owner is None:
+            return False
+        return bool(code_up and owner and owner != code_up)   # 两边都有代号且不同 = 另一门课
+
+    paths = []
+    for info in list((courses or {}).values()):
+        if isinstance(info, dict) and info.get("path"):
+            paths.append(str(info["path"]))
+    for info in list((teams_sources or {}).values()):
+        if isinstance(info, dict) and info.get("path"):
+            paths.append(str(info["path"]))
+    parents = [os.path.dirname(os.path.normpath(p)) for p in paths]
+    base = max(set(parents), key=parents.count) if parents else ""
+    if not base or not os.path.isdir(base):
+        base = download_root(cfg)
+
+    best, best_score = "", 0.0
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError:
+        entries = []
+    for entry in entries:
+        full = os.path.join(base, entry)
+        if not os.path.isdir(full) or blocked(full):
+            continue
+        score = dir_match_score(entry, name, code_up, folder_name)
+        if score > best_score:
+            best, best_score = full, score
+    if best and best_score >= 0.5:
+        return best + os.sep
+    # 新建目录时用模板渲染名（默认 {code} {name} → 「MAT203 Statistics」），而不是原样全名
+    return os.path.join(base, (folder_name or str(name or "")).strip() or "未命名课程") + os.sep
+
+
 def load_courses() -> dict:
     p = courses_path()
     if p.exists():
@@ -307,6 +545,42 @@ def save_courses(courses: dict) -> Path:
 
 
 # ── 点路径取值/设值 ────────────────────────────────────────────────────────
+def ignored_path() -> Path:
+    return home() / "ignored_courses.json"
+
+
+def load_ignored() -> set:
+    """「被 mk rm 摘掉、别再自动接回来」的课程 id 集合。
+
+    自动接课是按「本学期在 Moodle 上」来的，不带这个名单的话 `mk rm` 会变成假的——
+    早上摘掉、白天又自己回来。
+    """
+    p = ignored_path()
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    ids = data.get("ids") if isinstance(data, dict) else data
+    return {str(i) for i in (ids or [])}
+
+
+def save_ignored(ids) -> Path:
+    p = ignored_path()
+    p.write_text(json.dumps({"ids": sorted({str(i) for i in (ids or [])})},
+                            ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
+def ignore_course(course_id) -> None:
+    save_ignored(load_ignored() | {str(course_id)})
+
+
+def unignore_course(course_id) -> None:
+    save_ignored(load_ignored() - {str(course_id)})
+
+
 def normalize_key(key: str) -> str:
     k = (key or "").strip()
     if k in KEY_ALIASES:
@@ -377,8 +651,8 @@ def coerce(dotted: str, raw):
         s = str(raw).strip().lower()
         if s in choices:
             return s
-        # 允许说中文/宽松说法
-        fuzzy = {"天天": "heartbeat", "心跳": "heartbeat", "默认": "heartbeat",
+        # 允许说中文/宽松说法；一个词能指多个配置值时用元组（按顺序取第一个合法的）
+        fuzzy = {"天天": "heartbeat", "心跳": "heartbeat", "默认": ("heartbeat", "default"),
                  "安静": "silent", "静默": "silent", "不打扰": "silent",
                  "汇总": "digest", "日报": "digest", "摘要": "digest",
                  "紧急": "urgent", "只报紧急": "urgent",
@@ -386,10 +660,17 @@ def coerce(dotted: str, raw):
                  "本地": "local", "本机": "local", "通知": "local",
                  "telegram": "telegram", "电报": "telegram",
                  "自动": "auto", "你决定": "auto", "看情况": "auto",
-                 "不推送": "none", "关闭": "none", "无": "none"}
+                 "不推送": "none", "关闭": "none", "无": "none",
+                 # 文件命名（download.naming）
+                 "代号": "default", "课号": "default", "课程代号": "default", "带课号": "default",
+                 "简洁": "plain", "纯文件名": "plain", "只要名字": "plain", "不带代号": "plain",
+                 "原始": "original", "原名": "original", "原样": "original", "老样子": "original",
+                 "自定义": "custom", "自己定": "custom", "自己写": "custom", "模板": "custom"}
         for k, v in fuzzy.items():
-            if k in s and v in choices:
-                return v
+            if k in s:
+                for cand in (v if isinstance(v, tuple) else (v,)):
+                    if cand in choices:
+                        return cand
         raise ValueError("只能填其中之一：%s" % " / ".join(choices))
     return str(raw).strip()
 

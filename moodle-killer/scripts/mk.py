@@ -7,10 +7,11 @@
   mk setup        一步步配好（分块问询，随时可停）
   mk set 时间 07:00   改一项（说人话的键名也认）
   mk add / mk rm      加课 / 删课
-  mk test         试跑一次，不推送
+  mk test         试跑一次，不推送（不写状态）
+  mk fresh        立刻完整重扫一次（真跑，不占定时名额）
   mk doctor       体检，哪坏了直接告诉你
 
-其余：mk output / mk channel / mk schedule / mk pause / mk resume / mk install / mk help
+其余：mk output / mk channel / mk naming / mk mute / mk schedule / mk pause / mk resume / mk install / mk help
 所有命令都支持 --json，方便 Agent 解析。
 """
 from __future__ import annotations
@@ -19,6 +20,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +31,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import platform_support as ps  # noqa: E402
 ps.configure_console()
 import config_store as cs  # noqa: E402
-import sandbox as sb  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
@@ -75,6 +76,11 @@ def _mask(val):
 def cmd_status(args):
     cfg = cs.load_config()
     courses = cs.load_courses()
+    try:
+        import teams_sync
+        teams_sources = teams_sync.load_sources()
+    except (OSError, ValueError):
+        teams_sources = {}
     paused = bool(cs.get_path(cfg, "advanced.paused"))
     mode = cs.get_path(cfg, "output.mode")
     ch = cs.get_path(cfg, "delivery.channel")
@@ -88,6 +94,9 @@ def cmd_status(args):
             "moodle_user": cs.get_path(cfg, "moodle.user"),
             "courses": [{"key": k, "name": v.get("name"), "path": v.get("path"),
                          "mute": bool(v.get("mute"))} for k, v in courses.items()],
+            "teams_sources": [{"key": k, "name": v.get("name", k), "source": v.get("source"),
+                               "path": v.get("path"), "mute": bool(v.get("mute"))}
+                              for k, v in teams_sources.items()],
             "output_mode": mode,
             "channel": ch,
             "schedule": times,
@@ -95,6 +104,8 @@ def cmd_status(args):
             "paused": paused,
             "download_root": cs.get_path(cfg, "download.root"),
             "download_by_type": cs.get_path(cfg, "download.by_type"),
+            "download_naming": cs.get_path(cfg, "download.naming"),
+            "download_name_template": cs.get_path(cfg, "download.name_template"),
             "last_run": _last_run(),
             "install": _install_info(),
         }, ensure_ascii=False, indent=2))
@@ -103,16 +114,23 @@ def cmd_status(args):
     print(_c("1", "\n  Moodle-killer 现在的情况"))
     print(_c("90", "  数据目录：%s" % cs.home()))
 
-    creds = "已填" if cs.credentials_ok(cfg) else "缺"
-    print("\n  账号      %s ｜ %s ｜ %s" % (
-        cs.get_path(cfg, "moodle.url"), cs.get_path(cfg, "moodle.user") or "（没填学号）",
-        ("密码" + creds)))
+    if not courses and teams_sources:
+        print("\n  账号      Moodle 未配置（仅 Teams 本地来源）")
+    else:
+        creds = "已填" if cs.credentials_ok(cfg) else "缺"
+        print("\n  账号      %s ｜ %s ｜ %s" % (
+            cs.get_path(cfg, "moodle.url"), cs.get_path(cfg, "moodle.user") or "（没填学号）",
+            ("密码" + creds)))
     print("  课程      %d 门" % len(courses))
     for k, v in list(courses.items())[:8]:
         mute = "（静音）" if v.get("mute") else ""
         print("            · %s%s → %s" % (v.get("name"), mute, v.get("path")))
     if len(courses) > 8:
         print("            · …还有 %d 门" % (len(courses) - 8))
+    print("  Teams     %d 个本地同步来源" % len(teams_sources))
+    for key, info in list(teams_sources.items())[:8]:
+        print("            · %s%s → %s" % (info.get("name", key),
+              "（静音）" if info.get("mute") else "", info.get("path", "（未设置）")))
 
     real_ch, why = str(ch), ""
     try:
@@ -128,6 +146,11 @@ def cmd_status(args):
         ", ".join(times) or "（没设）", ch_label,
         "推" if cs.get_path(cfg, "delivery.weekend") else "不推"))
     print("  风格      %s（%s）" % (cs.MODE_LABELS.get(mode, mode), mode))
+    nm = str(cs.get_path(cfg, "download.naming") or "default").strip().lower()
+    nm_label = cs.NAMING_LABELS.get(nm, nm)
+    if nm == "custom":
+        nm_label += "：%s" % (cs.get_path(cfg, "download.name_template") or "")
+    print("  命名      %s（%s）" % (nm_label, nm))
     if paused:
         print("  状态      " + _c("33", "已暂停推送（mk resume 恢复）"))
     own = [v.get("path") for v in courses.values() if v.get("path")]
@@ -139,7 +162,8 @@ def cmd_status(args):
 
     last = _last_run()
     if last:
-        print("\n  最近一次  %s ｜ %s" % (last.get("time", "?"), last.get("summary", "")))
+        src_tag = "（手动重扫）" if last.get("source") == "fresh" else ""
+        print("\n  最近一次  %s%s ｜ %s" % (last.get("time", "?"), src_tag, last.get("summary", "")))
     else:
         print("\n  最近一次  " + _c("90", "还没跑过（mk test 试一下）"))
 
@@ -239,26 +263,9 @@ def cmd_set(args):
     return 0
 
 
-def cmd_get(args):
-    cfg = cs.load_config()
-    try:
-        dotted = cs.normalize_key(args.key)
-    except KeyError as e:
-        bad(str(e))
-        return 2
-    val = cs.get_path(cfg, dotted)
-    if args.json:
-        print(json.dumps({"key": dotted, "value": val}, ensure_ascii=False))
-    else:
-        print(_fmt(val))
-    return 0
-
-
 # ── add / rm ───────────────────────────────────────────────────────────────
 def _slug(name, cid=None):
-    key = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in (name or "").lower())
-    key = key.strip("_")[:24]
-    return key or ("course%s" % (cid or "x"))
+    return cs.course_key(name, cid)
 
 
 def cmd_add(args):
@@ -292,16 +299,21 @@ def cmd_add(args):
                 print(json.dumps(found, ensure_ascii=False, indent=2))
                 return 0
             # 带上课程 ID：同名课程（如多个分组）只能靠 ID 区分。
+            order = {"inprogress": 0, "future": 1, "unknown": 2, "past": 3}
+            tags = {"inprogress": "本学期", "future": "下学期（还没开始）",
+                    "past": "已结束", "unknown": "学期未知"}
             print("可选课程（用 mk add <名字> 添加）：")
-            for c in found:
-                print("  · %s (id=%s)" % (c.get("name"), c.get("id")))
+            for c in sorted(found, key=lambda x: order.get(x.get("timeline"), 9)):
+                tag = tags.get(c.get("timeline"), "")
+                print("  · %-16s %s (id=%s)" % ("[%s]" % tag if tag else "", c.get("name"), c.get("id")))
+            print(_c("90", "  「学期未知」的是 /my/ 页面里的旧课（接口不认它属于哪个学期），本学期的课优先。"))
             return 0
         okk, msg = onboarding.discover_and_pick(interactive=True)
         print(("✅ " if okk else "❌ ") + msg)
         return 0 if okk else 2
 
     try:
-        from moodle_client import MoodleClient
+        from moodle_client import MoodleClient, resolve_course_code
         client = MoodleClient()
         if not client.login():
             bad("登录失败，先检查账号（mk doctor）")
@@ -331,6 +343,13 @@ def cmd_add(args):
         courses[key].update({"id": hit["id"], "name": hit["name"]})
         courses[key].setdefault("path", os.path.join(base, hit["name"], ""))
         courses[key].setdefault("mute", False)
+        # 命名规则要用的课程代号与 Moodle 短名：课名里抠（MAT203）优先，抠不到用短名（AAI）
+        if hit.get("shortname"):
+            courses[key].setdefault("shortname", hit["shortname"])
+        code = resolve_course_code(hit, hit["name"])
+        if code:
+            courses[key].setdefault("code", code)
+        cs.unignore_course(hit["id"])                 # 手动加回来 = 撤出「不再自动接上」名单
         added.append(hit["name"])
     cs.save_courses(courses)
     if added:
@@ -350,9 +369,13 @@ def cmd_rm(args):
         return 2
     for k in hits:
         print("  移除 %s" % courses[k].get("name"))
+        if courses[k].get("id") is not None:
+            cs.ignore_course(courses[k]["id"])       # 别让自动接课明天又把它接回来
         del courses[k]
     cs.save_courses(courses)
     ok("已移除 %d 门课（已下载的文件不动）" % len(hits))
+    print(_c("90", "  本学期在 Moodle 上的课默认会自动接上，所以这次同时记进了「不再自动接上」名单；"))
+    print(_c("90", "  想恢复盯课：mk add <名字>。只想安静不推：用 mk mute（不摘课）。"))
     return 0
 
 
@@ -477,40 +500,6 @@ def cmd_send(args):
     return 0 if sent else 1
 
 
-_AGENT_PROMPT = """\
-# Moodle-killer 学业定时汇报 Prompt（供 Agent 定时任务直接复制使用）
-# 适用于：Hermes / OpenClaw / Claude Code / Codex / 豆包 等具备远程对话端（Telegram/WhatsApp/Web）的助手。
-
-你是我的 Moodle 学业助理。请按以下流程检查并汇报我今日的最新学业动态：
-
-1. 检查动态：
-   执行命令：python3 -c "import sys, os; sys.path.insert(0, os.path.expanduser('~/.agents/skills/moodle-killer/scripts')); import moodle_prep; moodle_prep.main([])"
-   （如果终端已安装 mk 命令，也可直接执行：mk）
-
-2. 处理输出与兜底：
-   - 提取命令输出的信号列表以及 ~/.moodle-killer/out/signals.txt。
-   - 若 ~/.moodle-killer/out/unclassified_moodle.json 有未命中项，参考 ~/.moodle-killer/user_requirements.md 快速裁决：仅保留“明天早上看到仍有行动价值”的学业事项。
-
-3. 输出要求（直接在当前对话端回复我）：
-   - 若有新作业、新文件、新成绩或到期倒计时：直接输出整理好的高密度信号（每行严格遵守 [分类] 课程: 内容 格式，≤5 行，零寒暄、零多余客套话）。
-   - 若输出为 [SILENT] 或无新内容且非 heartbeat 模式：严格保持静默，不要发送任何消息。
-   - 若扫描出现错误（❌）：必须原样透出错误详情，提醒我检查网络或重新登录。
-"""
-
-
-def cmd_prompt(args):
-    """输出给 Agent 远程控制对话端（Hermes/OpenClaw/Claude等）的定时任务 Prompt。"""
-    if args.json:
-        print(json.dumps({"prompt": _AGENT_PROMPT.strip()}, ensure_ascii=False))
-    else:
-        print(_AGENT_PROMPT.strip())
-    return 0
-
-
-def cmd_time(args):
-    return _set_or_show("delivery.schedule", args.value, label="推送时间")
-
-
 def _set_or_show(dotted, value, label, extra=None):
     cfg = cs.load_config()
     if value is None:
@@ -519,7 +508,8 @@ def _set_or_show(dotted, value, label, extra=None):
         print("%s：%s" % (label, _fmt(cur)))
         if meta.get("choices"):
             for c in meta["choices"]:
-                tag = cs.MODE_LABELS.get(c) or cs.CHANNEL_LABELS.get(c) or c
+                tag = (cs.MODE_LABELS.get(c) or cs.CHANNEL_LABELS.get(c)
+                       or cs.NAMING_LABELS.get(c) or c)
                 print("  %-10s %s" % (c, tag))
         if extra:
             extra()
@@ -551,7 +541,359 @@ def _describe_modes():
         print("  %-10s " % "" + _c("90", "→ " + who))
 
 
+# ── 文件命名 ───────────────────────────────────────────────────────────────
+def _naming_samples(per_course=2):
+    """用你课程里**真实**的文件名演示命名规则（离线、只读、不登录）。"""
+    import moodle_client as mc
+    cfg = cs.load_config()
+    mode = str(cs.get_path(cfg, "download.naming") or "default").strip().lower()
+    tpl = str(cs.get_path(cfg, "download.name_template") or mc.DEFAULT_NAME_TEMPLATE)
+    day = datetime.now().strftime("%Y%m%d")
+    rows = []
+    for inf in (cs.load_courses() or {}).values():
+        cname = inf.get("name") or ""
+        code = mc.resolve_course_code(inf, cname)
+        samples = []
+        try:
+            with open(os.path.join(str(cs.state_dir()), "course_%s.json" % inf.get("id")),
+                      encoding="utf-8") as f:
+                res = (json.load(f) or {}).get("resources") or {}
+        except Exception:
+            res = {}
+        for iid, mname in list(res.items())[:per_course]:
+            folder = mname.split(" / ")[0] if " / " in mname else ""
+            raw = mname.split(" / ")[-1]
+            stem, ext = os.path.splitext(raw)
+            samples.append({"moodle": mname, "raw": raw, "stem": stem, "ext": ext,
+                            "iid": str(iid), "folder": folder})
+        if not samples:
+            samples = [{"moodle": "（还没有记录，先按样子举例）", "raw": "Lecture 1.pdf",
+                        "stem": "Lecture 1", "ext": ".pdf", "iid": "123456",
+                        "folder": "Lecture Notes"}]
+        rows.append((cname, code, mode, tpl, samples, day))
+    return mode, tpl, rows
+
+
+def _name_preview(sample, mode, tpl, code, cname, day):
+    import moodle_client as mc
+    stem, ext, iid = sample["stem"], sample["ext"], sample["iid"]
+    # original 模式落地时用的是「活动ID-名字-摘要」（资料夹里的文件才有），这里按同一规则复现
+    m = re.match(r"^folder:(\d+):([0-9a-f]+)$", iid)
+    legacy = "%s-%s-%s%s" % (m.group(1), stem, m.group(2), ext) if m else ""
+    return mc.build_filename(stem, ext, mode=mode, template=tpl, code=code, course=cname,
+                             folder=sample["folder"], digest=iid, cmid=iid, day=day,
+                             legacy=legacy)
+
+
+def _print_naming_key():
+    import moodle_client as mc
+    print(_c("90", "  自定义模板可用的字段："))
+    for k, desc in mc.TEMPLATE_FIELDS.items():
+        print("    %-9s %s" % ("{%s}" % k, desc))
+
+
+def _demo_naming():
+    import moodle_client as mc
+    mode, tpl, rows = _naming_samples(per_course=1)
+    print(_c("1", "\n  同一份文件，四种命名规则分别会落地成什么名字（拿你自己的课举例）："))
+    for cname, code, _m, _t, samples, day in rows:
+        print("\n  " + _c("36", "%s（课程代号 %s）" % (cname, code or "无")))
+        for sample in samples:
+            print("    Moodle 里叫：%s" % sample["moodle"])
+            for m in mc.NAMING_MODES:
+                mark = _c("32", "   ← 你现在用的") if m == mode else ""
+                print("      %-9s → %s%s" % (m, _name_preview(sample, m, tpl, code, cname, day), mark))
+    print(_c("90", "\n  换：mk naming default|plain|original|custom"))
+    print(_c("90", "  自定义：mk set 命名 custom  +  mk set 命名模板 \"{code}-{date}-{name}\"\n"))
+    _print_naming_key()
+    return 0
+
+
+def cmd_naming(args):
+    if getattr(args, "demo", False):
+        return _demo_naming()
+    rc = 0
+    if args.value:
+        rc = _set_or_show("download.naming", args.value, label="文件命名")
+        if rc:
+            return rc
+    mode, tpl, rows = _naming_samples()
+    label = cs.NAMING_LABELS.get(mode, mode)
+    print("\n  文件命名：%s —— %s" % (mode, label))
+    if mode == "custom":
+        print(_c("90", "  你的模板：%s" % tpl))
+    print(_c("90", "\n  拿你课程里真实的文件举例（左=在 Moodle 里的名字，右=落到你电脑上的名字）："))
+    for cname, code, _m, _t, samples, day in rows:
+        print("\n  " + _c("36", "%s   [课程代号 %s]" % (cname, code or "无（在 courses.json 里填 code 可指定）")))
+        for sample in samples:
+            new = _name_preview(sample, mode, tpl, code, cname, day)
+            print("    %-38s → %s" % (sample["raw"][:37], new))
+    print(_c("90", "\n  换规则：mk naming default|plain|original|custom ｜ 四种并排：mk naming --demo"))
+    print(_c("90", "  Moodle 没写后缀的文件（如 Course Information），下载时会自动补上 .pdf/.zip"))
+    print(_c("90", "  自定义：mk set 命名 custom  +  mk set 命名模板 \"{code}-{date}-{name}\"\n"))
+    _print_naming_key()
+    return rc
+
+
 # ── test / doctor ──────────────────────────────────────────────────────────
+# ── 课程文件夹命名（mk folder）──────────────────────────────────────────────
+def _folder_config(load=True):
+    """(courses, teams, teams_module)：课程与 Teams 来源各自有一份落盘目录。"""
+    courses = cs.load_courses() if load else {}
+    try:
+        import teams_sync
+        teams = teams_sync.load_sources() or {}
+    except (OSError, ValueError):
+        teams_sync, teams = None, {}
+    return courses, teams, teams_sync
+
+
+def _folder_entries(courses=None, teams=None):
+    courses = cs.load_courses() if courses is None else courses
+    if teams is None:
+        teams = _folder_config()[1]
+    out = []
+    for key, info in (courses or {}).items():
+        if isinstance(info, dict):
+            out.append(("courses", key, info))
+    for key, info in (teams or {}).items():
+        if isinstance(info, dict):
+            out.append(("teams", key, info))
+    return out
+
+
+def _folder_save(courses, teams, teams_module):
+    cs.save_courses(courses or {})
+    if teams_module is not None and teams is not None:
+        teams_module.save_sources(teams)
+
+
+def _folder_plan(entries, tpl):
+    """算「磁盘实况 → 目标」。返回 (rows, conflicts)。
+
+    ⚠️ 必须看磁盘，不能只比配置字符串：配置指向 A、磁盘上是 B 时（手动改过名、
+    被别的工具搬过），只比字符串会判定「已符合」，下一次扫描就另建一个空目录，
+    把同一门课的课件劈成两半。踩过：`Anti Corruption` 改名后又被改回 `MPU3322 …`，
+    配置仍指向 `MPU1022 …`，工具一路说「没问题」。
+    """
+    rows, seen = [], {}
+    for kind, key, entry in entries:
+        # 配置里可能写着未展开的 ~/…，一律先展开再判断（否则会把好目录当成「没了」）
+        cur = os.path.expanduser(str(entry.get("path") or ""))
+        name = cs.render_folder_name(entry, tpl)
+        base = os.path.dirname(os.path.normpath(cur)) if cur else cs.download_root()
+        target = os.path.join(base, name) + os.sep
+        found, ambiguous = "", []
+        if cur and not os.path.isdir(cur):
+            try:
+                names = sorted(os.listdir(base))
+            except OSError:
+                names = []
+            cands = []
+            for d in names:
+                full = os.path.join(base, d)
+                if not os.path.isdir(full):
+                    continue
+                score = cs.dir_match_score(d, entry.get("name"), entry.get("code"), name)
+                if score >= 0.5:
+                    cands.append((score, full))
+            if cands:
+                best = max(c[0] for c in cands)
+                top = [p for s, p in cands if s == best]
+                # 并列第一 = 分不清是哪一个 → 一个都不许动（挑错 = 把课件搬进别的课）
+                ambiguous = sorted(top) if len(top) > 1 else []
+                found = top[0] if len(top) == 1 else ""
+        rows.append({"kind": kind, "key": key, "entry": entry, "cur": cur,
+                     "target": target, "found": found, "ambiguous": ambiguous,
+                     "state": "", "source": ""})
+        seen.setdefault(os.path.normpath(target), []).append(key)
+    conflicts = {p for p, keys in seen.items() if len(keys) > 1}
+    for row in rows:
+        row["state"], row["source"] = _folder_state(row, conflicts)
+    return rows, conflicts
+
+
+def _folder_state(row, conflicts):
+    """(状态, 要移动的源目录)。看不清就不动手 —— 这个命令绝不许产生「劈成两半」。"""
+    cur, target, found = row["cur"], row["target"], row["found"]
+    if not cur:
+        return "只写配置（这门课还没有目录）", ""
+    same = os.path.normpath(cur) == os.path.normpath(target)
+    if row.get("ambiguous"):
+        return ("❌ 歧义：磁盘上有多个像这门课的目录（%s），先自己确认，我不动"
+                % "、".join(os.path.basename(p) for p in row["ambiguous"][:3])), ""
+    if os.path.isdir(cur):
+        if same:
+            return "已经是这个名字", ""
+        if os.path.normpath(target) in conflicts:
+            return "❌ 冲突：多门课会算成同一个名字（改模板或改名）", ""
+        if os.path.exists(target):
+            # macOS 默认大小写不敏感：只差大小写时 samefile 为真 —— 那是同一个目录，
+            # 不能当成「目标已存在」而永远跳过（大小写就再也修不好了）
+            try:
+                if os.path.samefile(cur, target):
+                    return "只改大小写", cur
+            except OSError:
+                pass
+            return "❌ 跳过：目标目录已存在（绝不合并）", ""
+        return "重命名", cur
+    # 配置指向的目录不在磁盘上：可能被手动改名/被别的工具搬走
+    if found:
+        if os.path.normpath(found) == os.path.normpath(target):
+            return "修好配置（磁盘上已经是模板名，配置路径失效了）", ""
+        if os.path.normpath(target) in conflicts:
+            return "❌ 冲突：多门课会算成同一个名字（改模板或改名）", ""
+        if os.path.exists(target):
+            return "❌ 跳过：目标目录已存在（绝不合并）", ""
+        return "重命名（配置路径已失效，磁盘上是「%s」）" % os.path.basename(found), found
+    return "只写配置（目录还没建）", ""
+
+
+def _folder_short(p):
+    p = str(p or "")
+    return p.replace(os.path.expanduser("~"), "~") if p else "（无）"
+
+
+def _folder_render_rows(rows, verbose=False):
+    for row in rows:
+        entry, state = row["entry"], row["state"]
+        who = "Teams" if row["kind"] == "teams" else "Moodle"
+        mark = {"重命名": "→", "已经是这个名字": "＝"}.get(state, "·")
+        if state.startswith("重命名"):
+            mark = "→"
+        print("  %-6s %-42s %s %s" % (who, (entry.get("name") or row["key"])[:40], mark,
+                                      _folder_short(row["target"])))
+        if state.startswith("重命名") or state.startswith("修好配置"):
+            print(_c("33", "          %s" % state) if state.startswith("修好配置")
+                  else _c("90", "          %s" % state))
+            print(_c("90", "          现在：%s" % _folder_short(row["cur"] or row["source"])))
+        elif state.startswith("❌"):
+            print(_c("33", "          %s" % state))
+
+
+def _folder_fields_help():
+    print(_c("90", "  可用字段（组合起来就是文件夹名）："))
+    for key, desc in cs.FOLDER_FIELDS.items():
+        print("    %-11s %s" % ("{%s}" % key, desc))
+
+
+def _folder_demo():
+    entries = _folder_entries()
+    if not entries:
+        warn("还没盯任何课（mk add / mk new 之后再回来看）")
+        return 2
+    print(_c("1", "\n  同一批课，几种常见组合分别会得到什么文件夹名："))
+    for tpl in ("{code} {name}", "{name}", "{code} {name} {semester}",
+                "{code} {name} ({teacher})", "{fullname}"):
+        rows, _ = _folder_plan(entries, tpl)
+        mark = _c("32", "   ← 你现在用的") if tpl == (cs.get_path(cs.load_config(), "download.folder_template")) else ""
+        print("\n  " + _c("36", tpl) + mark)
+        for row in rows[:6]:
+            print("    %s" % os.path.basename(os.path.normpath(row["target"])))
+    _folder_fields_help()
+    print(_c("90", "\n  换：mk folder \"{code} {name}\" ｜ 真的重命名现有文件夹：mk folder --apply\n"))
+    return 0
+
+
+def cmd_folder(args):
+    """看/改课程文件夹的命名组合；--apply 按模板重命名现有文件夹。"""
+    cfg = cs.load_config()
+    if args.value is not None:
+        # 显式给了值就得过得去校验（`mk folder ""` 是「空模板」，不是「查看」）
+        try:
+            cs.check_folder_template(args.value)
+        except ValueError as e:
+            bad(str(e))
+            return 2
+        cs.set_path(cfg, "download.folder_template", args.value.strip())
+        cs.save_config(cfg)
+        ok("课程文件夹命名模板 → %s" % args.value.strip())
+    if getattr(args, "apply", False):
+        return _folder_apply(cfg)
+    if getattr(args, "demo", False):
+        return _folder_demo()
+
+    tpl = cs.get_path(cfg, "download.folder_template") or "{code} {name}"
+    print(_c("1", "\n  课程文件夹命名：%s" % tpl))
+    entries = _folder_entries()
+    if not entries:
+        warn("还没盯任何课（mk add / mk new 之后再回来看）")
+        return 0
+    rows, _conflicts = _folder_plan(entries, tpl)
+    print(_c("90", "\n  按这个模板，你的课会是（＝已符合 ｜ →要动 ｜ ·只写配置）："))
+    _folder_render_rows(rows, verbose=True)
+    _folder_fields_help()
+    print(_c("90", "\n  换组合：mk folder \"{code} {name} ({teacher})\" ｜ 并排看几种：mk folder --demo"))
+    print(_c("90", "  真的把现有文件夹改成这个规则：mk folder --apply（先备份配置，逐条打印）\n"))
+    return 0
+
+
+def _folder_apply(cfg):
+    """按当前模板重命名现有文件夹（先备份配置；冲突/目标已存在的一律跳过，不合并）。"""
+    tpl = cs.get_path(cfg, "download.folder_template") or "{code} {name}"
+    courses, teams, teams_module = _folder_config()
+    rows, conflicts = _folder_plan(_folder_entries(courses, teams), tpl)
+    print(_c("1", "\n  按「%s」对齐课程文件夹：" % tpl))
+    _folder_render_rows(rows, conflicts and True)
+
+    todo = [r for r in rows if r["state"].startswith("重命名") or r["state"] == "只改大小写"]
+    config_only = [r for r in rows if r["state"].startswith(("只写配置", "修好配置"))]
+    if not todo and not config_only:
+        ok("不用改：磁盘和配置已经对得上。")
+        return 0
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = cs.home() / "backups" / ("%s_folder-rename" % stamp)
+    backup.mkdir(parents=True, exist_ok=True)
+    for name in ("courses.json", "teams_sources.json"):
+        src = cs.home() / name
+        if src.exists():
+            shutil.copy2(str(src), str(backup / name))
+    print(_c("90", "\n  已备份配置：%s" % backup))
+
+    moved, failed = [], []
+    for row in todo:
+        src, target = row["source"], row["target"]
+        if not os.path.isdir(src):
+            failed.append(row["entry"].get("name"))
+            warn("源目录不见了，跳过：%s" % _folder_short(src))
+            continue
+        try:
+            # 源和目标的尾斜杠都要去掉：目标带尾斜杠会被当成「目录名 + /」报 ENOTDIR；
+            # **源带尾斜杠时 os.rename 会跟随软链**，把软链指向的真实目录搬走、留下死链接（实测踩过）
+            src_clean, target_clean = src.rstrip(os.sep), target.rstrip(os.sep)
+            if row["state"] == "只改大小写":
+                # 同一个目录只差大小写：走两步，否则目标「已存在」会把自己绊住
+                tmp = "%s.mk-tmp-%s" % (src_clean, datetime.now().strftime("%H%M%S"))
+                shutil.move(src_clean, tmp)
+                shutil.move(tmp, target_clean)
+            else:
+                shutil.move(src_clean, target_clean)
+        except OSError as e:
+            failed.append(row["entry"].get("name"))
+            warn("重命名失败：%s（%s）" % (row["entry"].get("name"), e))
+            continue
+        row["entry"]["path"] = target
+        moved.append((row["entry"].get("name"), os.path.basename(os.path.normpath(target))))
+    for row in config_only:
+        row["entry"]["path"] = row["target"]
+
+    _folder_save(courses, teams, teams_module)
+    for name, newname in moved:
+        ok("%s → %s" % (name, newname))
+    for row in config_only:
+        if row["state"].startswith("修好配置"):
+            print(_c("33", "  修好配置：%s 的路径指向磁盘上已有的 %s"
+                     % (row["entry"].get("name"), os.path.basename(os.path.normpath(row["target"])))))
+        else:
+            print(_c("90", "  %s 只更新了配置路径（还没有文件夹，下次下载用新名字）" % row["entry"].get("name")))
+    if failed:
+        bad("%d 个没改成（见上面原因）" % len(failed))
+        return 1
+    print(_c("90", "\n  想换回去或换别的组合：mk folder \"<模板>\" 再 mk folder --apply\n"))
+    return 0
+
+
 def cmd_test(args):
     script = os.path.join(HERE, "moodle_prep.py")
     cmd = [sys.executable or "python3", script, "--dry-run"]
@@ -564,10 +906,45 @@ def cmd_test(args):
     return p.returncode
 
 
+def cmd_fresh(args):
+    """立刻完整重扫一次：跟早上定时那一趟走同一条真跑路径，但不占定时名额。
+
+    真跑 = 真登录 / 真下载 / 真勾 Done / 写正式 state 与 out（不是 mk test 的试跑）。
+    全程不碰任何调度器，所以下一次定时排期原封不动 —— 这正是它和
+    `hermes cron run` 那类「手动触发」的根本区别（后者会吃掉下一次排期）。
+    """
+    script = os.path.join(HERE, "moodle_prep.py")
+    # flush：不刷的话这行会被缓冲到子进程输出之后，看起来像先跑后说
+    say = (lambda *a: print(*a, flush=True, file=sys.stderr)) if args.json else \
+        (lambda *a: print(*a, flush=True))
+    before = _cron_next_run_at()
+    say(_c("90", "  完整重扫中（真登录 / 真下载 / 真勾 Done，跟早上同一套；不碰定时器）…\n"))
+    cmd = [sys.executable or "python3", script] + (["--json"] if args.json else [])
+    env = dict(os.environ)
+    env["MOODLE_KILLER_SOURCE"] = "fresh"  # 记进 last_run.json：这一趟是手动重扫
+    code = subprocess.run(cmd, env=env).returncode
+    after = _cron_next_run_at()
+    if before:
+        if after == before:
+            say(_c("90", "\n  ✅ 定时名额没动：下次仍然 %s" % after))
+        else:
+            say(_c("33", "\n  ⚠️ 定时排期变了：%s → %s，跑 mk doctor 看一眼" % (before, after)))
+    say(_c("90", "  这一趟已经把新内容记成「已看过」：下次定时照跑，但可能只剩一句心跳——"))
+    say(_c("90", "  所以这一轮的信号就是今天要算数的那份，别让它只留在终端里。"))
+    return code
+
+
 def cmd_doctor(args):
     import onboarding
     cfg = cs.load_config()
     checks = []
+    courses = cs.load_courses()
+    try:
+        import teams_sync
+        teams_sources = teams_sync.load_sources()
+        teams_error = None
+    except (OSError, ValueError) as exc:
+        teams_sources, teams_error = {}, str(exc)
 
     def add(level, name, detail, fix=""):
         checks.append({"level": level, "name": name, "detail": detail, "fix": fix})
@@ -597,38 +974,90 @@ def cmd_doctor(args):
     # 3 配置
     if cs.config_path().exists():
         add("ok", "配置文件", str(cs.config_path()))
+    elif not courses and teams_sources:
+        add("skip", "配置文件", "仅 Teams 来源；使用默认推送设置")
     else:
         add("bad", "配置文件", "不存在", "mk setup")
-    if cs.credentials_ok(cfg):
+    if not courses and teams_sources:
+        add("skip", "Moodle 账号", "未配置 Moodle 课程，仅扫描 Teams 本地来源")
+    elif cs.credentials_ok(cfg):
         add("ok", "账号信息", "%s @ %s" % (cs.get_path(cfg, "moodle.user"), cs.get_path(cfg, "moodle.url")))
     else:
         add("bad", "账号信息", "没填全", "mk set 账号 xxx / mk set 密码 xxx")
 
     # 4 登录
-    if cs.credentials_ok(cfg):
+    if not courses and teams_sources:
+        add("skip", "登录测试", "仅 Teams 本地来源，不需要 Moodle 登录")
+    elif cs.credentials_ok(cfg):
         okk, msg = onboarding.verify_login(cfg)
         add("ok" if okk else "bad", "登录测试", msg, "" if okk else "核对学号/密码，或先手动登录一次网站")
     else:
         add("skip", "登录测试", "跳过（账号没填）")
 
     # 5 课程
-    courses = cs.load_courses()
     if courses:
         add("ok", "已选课程", "%d 门" % len(courses))
+        # 课程代号：很多学校 Moodle 不填官方编号、课名里也可能没有（实测 XMUM 的
+        # Abstract Algebra I 要翻到 syllabus 的 Course Code 才拿到 MAT211）。
+        # setup 阶段没攒够，后面文件名/文件夹名就只能退化成课名 —— 这里提前点出来。
+        nocode = [v.get("name") for v in courses.values()
+                  if isinstance(v, dict) and not v.get("code")]
+        nocode = [n for n in nocode if n]
+        if nocode:
+            add("warn", "课程代号", "%d 门还没确认（%s）" % (len(nocode), "、".join(n[:18] for n in nocode[:3])),
+                "跑 mk code 深查（翻课程资料里的 Course Code）；急用就 mk code <课名> <代号> 指定")
+        else:
+            add("ok", "课程代号", "%d 门都有（含来源标注）" % len(courses))
         missing = [v.get("name") for v in courses.values() if not v.get("path")]
         if missing:
             add("warn", "课程下载目录", "%s 没设路径" % "、".join(missing), "mk set 下载目录 <路径> 后重新 mk add")
+    elif teams_sources:
+        add("skip", "Moodle 课程", "0 门；Teams 来源单独运行")
     else:
         add("bad", "已选课程", "0 门", "mk add")
+
+    if teams_error:
+        add("bad", "Teams 配置", teams_error, "检查 ~/.moodle-killer/teams_sources.json")
+    if teams_sources and not courses and not any(
+            isinstance(info, dict) and not info.get("mute") for info in teams_sources.values()):
+        add("bad", "Teams 来源", "所有来源都已静音", "在 teams_sources.json 中取消静音")
+    for key, info in teams_sources.items():
+        if not isinstance(info, dict) or not info.get("source") or not info.get("path"):
+            add("bad", "Teams 来源 %s" % key, "缺 source 或 path", "检查 teams_sources.json")
+        elif info.get("mute"):
+            add("skip", "Teams 来源 %s" % key, "已静音")
+        elif os.path.isdir(os.path.expanduser(info["source"])):
+            add("ok", "Teams 来源 %s" % key, "本地目录存在")
+        else:
+            add("bad", "Teams 来源 %s" % key, "本地目录不可用", "检查 OneDrive 是否已同步")
 
     # 6 下载目录
     root = os.path.expanduser(cs.get_path(cfg, "download.root") or "")
     own = [(k, v.get("path")) for k, v in courses.items() if v.get("path")]
     if courses and own and len(own) == len(courses):
         # 每门课都自己指定了目录 → 根目录用不上，只看各课目录（缺的第一次下载会自动建）
-        gone = [p for _, p in own if not os.path.isdir(os.path.expanduser(p))]
+        gone = [(k, p) for k, p in own if not os.path.isdir(os.path.expanduser(p))]
         if gone:
-            add("ok", "下载目录", "每门课各自指定（%d 门还没建，第一次下载自动创建）" % len(gone))
+            # 区分「还没建」和「磁盘上是别的名字」：后者不修就会另建空目录、把课件劈成两半
+            stray = []
+            for key, p in gone:
+                info = courses.get(key) or {}
+                base = os.path.dirname(os.path.normpath(os.path.expanduser(p)))
+                target = os.path.basename(os.path.normpath(p))
+                try:
+                    names = sorted(os.listdir(base))
+                except OSError:
+                    names = []
+                for d in names:
+                    full = os.path.join(base, d)
+                    if os.path.isdir(full) and cs.dir_match_score(d, info.get("name"), info.get("code"), target) >= 0.5:
+                        stray.append("%s（配置指向 %s）" % (d, target))
+                        break
+            if stray:
+                add("bad", "下载目录对不上磁盘", "；".join(stray[:3]),
+                    "先跑 mk folder 看清单，再 mk folder --apply 对齐（否则下次扫描会另建空目录、课件被劈成两半）")
+            else:
+                add("ok", "下载目录", "每门课各自指定（%d 门还没建，第一次下载自动创建）" % len(gone))
         else:
             add("ok", "下载目录", "每门课各自指定，%d 个目录都在" % len(own))
     elif root:
@@ -715,8 +1144,8 @@ def cmd_doctor(args):
     return 1 if nbad else 0
 
 
-def _hermes_cron_next_run():
-    """线上其实靠 Hermes 的定时任务在跑，脚本自己看不见——这里去它的任务表里找。"""
+def _cron_moodle_job():
+    """Hermes 定时任务表里 moodle 那条（dict；没有/读不到就是 None）。只读，绝不改调度。"""
     p = os.path.expanduser("~/.hermes/cron/jobs.json")
     if not os.path.exists(p):
         return None
@@ -730,10 +1159,29 @@ def _hermes_cron_next_run():
     for j in jobs or []:
         if not isinstance(j, dict):
             continue
-        blob = json.dumps(j, ensure_ascii=False).lower()
-        if "moodle" in blob:
-            return j.get("next_run") or j.get("next_run_at") or "（已挂）"
+        if "moodle" in json.dumps(j, ensure_ascii=False).lower():
+            return j
     return None
+
+
+def _cron_next_run_at():
+    """那条任务的下次排期（空串 = 没挂 / 查不到）。"""
+    try:
+        job = _cron_moodle_job() or {}
+    except Exception:
+        return ""
+    return job.get("next_run_at") or job.get("next_run") or ""
+
+
+def _hermes_cron_next_run():
+    """线上其实靠 Hermes 的定时任务在跑，脚本自己看不见——这里去它的任务表里找。"""
+    try:
+        job = _cron_moodle_job()
+    except Exception:
+        return None
+    if not job:
+        return None
+    return job.get("next_run_at") or job.get("next_run") or "（已挂）"
 
 
 def _scheduler_status():
@@ -774,6 +1222,175 @@ def _remove_scheduler():
     except Exception:
         removed = []
     return "、".join(removed)
+
+
+def cmd_code(args):
+    """看 / 查 / 定课程代号（Course Code）。
+
+    - 不带参数：把每门课的代号现状列出来，并**当场深查**（Moodle 官方编号 → 课名 →
+      课程资料的「Course Code」字段 → Teams 来源交叉验证）
+    - `--apply`：把查到的**已确认**代号写进配置
+    - `mk code <课名关键词> <代号>`：人工指定（最高可信，之后不再被自动改）
+    """
+    import course_code as cc
+    cfg = cs.load_config()
+    courses = cs.load_courses()
+    try:
+        import teams_sync
+        teams = teams_sync.load_sources()
+    except (OSError, ValueError):
+        teams = {}
+    if not courses:
+        warn("还没盯任何课（mk add / mk new 之后再回来看）")
+        return 2
+
+    if args.value:
+        if not args.rest:
+            bad("人工指定要两个参数：mk code <课名关键词> <代号>（如 mk code 抽象代数 MAT211）")
+            return 2
+        new_code = str(args.rest[0]).strip().upper()
+        if not re.fullmatch(r"[A-Za-z0-9]{2,10}", new_code):
+            bad("代号只接受字母数字（如 MAT211 / MPU3322）")
+            return 2
+        hit = args.value.lower()
+        hits = [k for k, v in courses.items()
+                if hit in k.lower() or hit in (v.get("name") or "").lower()]
+        if not hits:
+            bad("没找到这门课：%s" % args.value)
+            print(_c("90", "  现在盯的课："))
+            for v in courses.values():
+                print(_c("90", "    · %s（现在代号：%s）"
+                         % (v.get("name"), v.get("code") or "未确认")))
+            return 2
+        for k in hits:
+            print("  %s：%s → %s" % (courses[k].get("name"), courses[k].get("code") or "(未确认)", new_code))
+            courses[k]["code"] = new_code
+            courses[k]["code_source"] = "manual"
+        cs.save_courses(courses)
+        ok("已指定 %d 门课的代号（来源=人工，之后不会被自动改）" % len(hits))
+        print(_c("90", "  想让文件夹跟着改名：mk folder 看清单 → mk folder --apply\n"))
+        return 0
+
+    rows = cc.enrich(courses, cfg, teams, deep=True, write=getattr(args, "apply", False))
+    print(_c("1", "\n  课程代号（Course Code）"))
+    print(_c("90", "  来源优先级：人工 › Moodle 官方编号 › 课名 › 课程资料（syllabus 的 Course Code）› Teams 交叉验证；"))
+    print(_c("90", "  **Moodle 短名（AAI/Stat/PDEs）不算代号**，只作缩写，绝不写进 code。\n"))
+    unconfirmed = []
+    for row in rows:
+        if row["status"] == "confirmed":
+            mark = _c("32", "✅")
+            detail = "%s（%s）" % (row["code"], row["why"])
+            if row["changed"]:
+                detail += "  ← 已写入"
+        elif row["status"] == "multi":
+            mark = _c("33", "❓")
+            detail = "多个候选：%s → 用 mk code \"%s\" <代号> 指定" % (
+                "、".join(t for t, _ in row["candidates"][:4]), row["name"][:14])
+            unconfirmed.append(row)
+        else:
+            mark = _c("33", "⚠️")
+            detail = "未确认：%s" % row["why"]
+            unconfirmed.append(row)
+        print("  %s %-42s %s" % (mark, row["name"][:40], detail))
+        if row["status"] != "confirmed" and row["shortname"]:
+            print(_c("90", "        Moodle 短名 %s（只是缩写，不是代号）" % row["shortname"]))
+    if unconfirmed:
+        print(_c("90", "\n  %d 门还没拿到代号：课名里没有、Moodle 官方编号为空、课程资料里也还没出现。"
+                 % len(unconfirmed)))
+        print(_c("90", "  通常等老师把 syllabus 传上来、下次真跑会自动确认；急的话手动指定：mk code <课名> <代号>"))
+    if getattr(args, "apply", False):
+        if any(row["changed"] for row in rows):
+            cs.save_courses(courses)
+        ok("已把确认的代号写进 courses.json（%d 门有更新）" % sum(1 for r in rows if r["changed"]))
+        print(_c("90", "  想让文件夹跟着改名：mk folder --apply\n"))
+    else:
+        print(_c("90", "\n  写入配置：mk code --apply ｜ 人工指定：mk code <课名> <代号>\n"))
+    return 0
+
+
+def cmd_new(args):
+    """新学期切换：摘掉上学期的课，接上本学期的课。默认只预览，`--yes` 才动手。
+
+    判据只有一条：Moodle 自己的学期分类（inprogress = 本学期）。读不到就不动手 ——
+    这是**唯一**能分清「上学期 vs 本学期」的来源：`/my/` 页面给的是「最近访问」，
+    拿它当依据会把去年的课也当成在上的课。
+    """
+    import moodle_prep
+    cfg = cs.load_config()
+    courses = cs.load_courses()
+    try:
+        from moodle_client import MoodleClient
+        client = MoodleClient()
+        with contextlib.redirect_stdout(sys.stderr):
+            if not client.login():
+                bad("登录失败，先跑 mk doctor")
+                return 2
+        with contextlib.redirect_stdout(sys.stderr):
+            timeline = client.courses_timeline()
+    except SystemExit as e:
+        bad(str(e))
+        return 2
+    except Exception as e:
+        bad("读学期清单失败：%s" % e)
+        return 2
+
+    inprogress = [c for c in (timeline.get("inprogress") or []) if isinstance(c, dict)] \
+        if isinstance(timeline, dict) else []
+    if not inprogress:
+        bad("读不到本学期课程清单（Moodle 接口没返回）→ 什么都没动。先 mk doctor 查登录/网络。")
+        return 2
+
+    current = {str(c.get("id")) for c in inprogress}
+    keep_ids = {str(v.get("id")) for v in courses.values() if isinstance(v, dict)}
+    drop = [(k, v) for k, v in courses.items() if str(v.get("id")) not in current]
+    add = [c for c in inprogress if str(c.get("id")) not in keep_ids]
+    future = [c for c in (timeline.get("future") or []) if isinstance(c, dict)]
+
+    from html import unescape
+
+    def _nm(raw):
+        # 接口的 fullname 是 HTML 转义过的（实测 "Integrity &amp; Anti-Corruption"）
+        return re.sub(r"\s+", " ", unescape(str(raw or ""))).strip()
+
+    print(_c("1", "\n  新学期切换（本学期 %d 门）" % len(inprogress)))
+    for c in inprogress:
+        mark = "已在盯" if str(c.get("id")) in keep_ids else "将接上"
+        print("    [本学期] %-14s %s" % (mark, _nm(c.get("fullname") or c.get("shortname"))))
+    for _k, v in drop:
+        print("    [将摘掉] %-14s %s" % ("上学期", v.get("name")))
+    for c in future:
+        print("    [下学期] %-14s %s（还没开始，先不动）" % ("暂不处理", _nm(c.get("fullname"))))
+
+    if not drop and not add:
+        ok("已经是最新学期的状态，不用切换。")
+        return 0
+    if not args.yes:
+        print(_c("90", "\n  以上为预览，没有动任何东西。摘掉的课**只取消盯课**："))
+        print(_c("90", "  已下载的文件、state 记录都原样留着。确认执行：mk new --yes"))
+        return 0
+
+    # 真动手：先备份，再摘，再让接课逻辑把本学期的接上（含首次扫描与下载）
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = cs.home() / "backups" / ("%s_mk-new" % stamp)
+    backup.mkdir(parents=True, exist_ok=True)
+    cs.save_courses(courses)                       # 落一次当前状态，保证备份就是改动前的事实
+    shutil.copy2(str(cs.courses_path()), str(backup / "courses.json"))
+    print(_c("90", "  已备份：%s" % backup))
+    for k, _v in drop:
+        courses.pop(k, None)
+    cs.save_courses(courses)
+    if drop:
+        ok("已摘掉 %d 门（上学期）：%s" % (len(drop), "、".join(v.get("name", "") for _k, v in drop)))
+
+    attached, notes = moodle_prep.attach_new_courses(client, cfg, courses, download=True)
+    for info in attached:
+        ok(moodle_prep.attach_summary_item(info))
+    for n in notes:
+        warn(str(n))
+    if attached:
+        print(_c("90", "  新课首轮只报这一行、且不勾 Done（首轮安全闸门），从下一次扫描起正常逐条报。"))
+    print(_c("90", "\n  下一步：mk status 复核；想立刻完整跑一遍：mk fresh"))
+    return 0
 
 
 def cmd_pause(args):
@@ -875,17 +1492,23 @@ HELP = """\
     mk                  看现在什么情况
     mk setup            一步步配好（问一块答一块，随时可停）
     mk set 时间 07:00   改一项；不带值就显示当前值
-    mk add / mk rm 课名  加课 / 删课
-    mk test             试跑一次（不推送）
+    mk add / mk rm 课名  加课 / 删课（本学期新课一般会自己接上，见 mk new）
+    mk new [--yes]      新学期切换：摘上学期的课、接本学期的课（默认只预览）
+    mk code             看/查课程代号（Course Code）；--apply 写入，或 mk code 课名 代号 指定
+    mk test             试跑一次（不推送、不写状态）
+    mk fresh            立刻完整重扫一次（真跑，不占定时名额）
     mk doctor           体检，哪坏了直接说怎么修
 
   改细节
     mk output [风格]    heartbeat|silent|digest|urgent|full
     mk output --demo    并排看 5 种风格长什么样
+    mk naming [规则]    default 课程代号-文件名 | plain 只用文件名 | original Moodle 原名 | custom 自定义
+    mk naming --demo    并排看你四种规则分别会落地成什么文件名
+    mk folder [模板]    课程文件夹怎么命名，如 {code} {name} → 「MAT203 Statistics」
+    mk folder --demo    并排看几种组合分别会得到什么文件夹名
+    mk folder --apply   按当前模板把现有课程文件夹真的改名（先备份配置）
     mk channel [通道]   auto|local|hermes|telegram|ntfy|webhook|whatsapp|none
     mk channel test     测试当前通道（实际发送一条消息）
-    mk send [文字]      通过当前通道发送测试消息
-    mk time [HH:MM]     一个或多个，如 08:30,20:00
     mk mute 课名         某门课单独静音 / 恢复
     mk find [关键词]     在电脑里找「像课件的文件夹」，列编号给你挑
     mk schedule [auto|manual|off]
@@ -896,11 +1519,6 @@ HELP = """\
     mk install          复制到 3 个标准技能目录（自动）
     mk update           拉取最新代码并自动重新同步
     mk harnesses        看装到哪了；没读到就让 Agent 自己装
-    mk prompt           获取给 Agent 定时任务（Hermes等）的远程对话 Prompt
-
-  想试新改动又怕弄乱现有配置
-    mk sandbox          造个干净环境（假 HOME + 空工作目录）
-    mk sandbox codex    直接进沙盒里的 Codex；测完 mk sandbox rm
 
   给 Agent 用
     任何命令加 --json 都能拿到结构化结果
@@ -908,6 +1526,7 @@ HELP = """\
     mk setup --answers '{"delivery.schedule":"08:30"}'
 
   在聊天里也可以直接说：「配置 moodle」「moodle 状态」「moodle 改推送时间 07:00」
+  「moodle 现在重扫一遍」= mk fresh（真跑一次，不占明早的定时名额）
 """
 
 
@@ -938,9 +1557,6 @@ def build_parser():
     sp.add_argument("value", nargs="?")
     sp.add_argument("--advanced", action="store_true")
 
-    sp = add("get", cmd_get, "看一项配置")
-    sp.add_argument("key")
-
     sp = add("add", cmd_add, "加课程")
     sp.add_argument("names", nargs="*")
 
@@ -950,27 +1566,33 @@ def build_parser():
     sp = add("mute", cmd_mute, "某门课静音/恢复")
     sp.add_argument("name")
 
-    for name, fn in (("output", cmd_output), ("channel", cmd_channel), ("time", cmd_time)):
+    for name, fn in (("output", cmd_output), ("channel", cmd_channel),
+                     ("naming", cmd_naming), ("folder", cmd_folder)):
         sp = add(name, fn, "看/改 %s" % name)
         sp.add_argument("value", nargs="?")
-        if name == "output":
-            sp.add_argument("--demo", action="store_true", help="打印 5 种风格的实际样例")
+        if name in ("output", "naming", "folder"):
+            sp.add_argument("--demo", action="store_true", help="打印各选项的实际样子")
+        if name == "folder":
+            sp.add_argument("--apply", action="store_true",
+                            help="按模板重命名现有课程文件夹（先备份配置）")
 
     add("test", cmd_test, "试跑一次")
+    add("fresh", cmd_fresh, "立刻完整重扫一次（真跑，不占定时名额）")
     add("doctor", cmd_doctor, "体检")
-    sp = add("send", cmd_send, "测试推送通道")
-    sp.add_argument("words", nargs="*")
 
     sp = add("find", cmd_find, "在电脑里找文件夹")
     sp.add_argument("words", nargs="*")
 
-    sp = add("sandbox", sb.cmd_sandbox, "给 Codex 造一个干净测试环境")
-    sp.add_argument("action", nargs="?", default="create",
-                    choices=["create", "codex", "shell", "status", "reset", "rm"])
-    sp.add_argument("rest", nargs="*")
-
     sp = add("schedule", cmd_schedule, "定时任务")
     sp.add_argument("value", nargs="?")
+
+    sp = add("code", cmd_code, "看/查/定课程代号（Course Code）")
+    sp.add_argument("value", nargs="?")
+    sp.add_argument("rest", nargs="*")
+    sp.add_argument("--apply", action="store_true", help="把查到的代号写进配置")
+
+    sp = add("new", cmd_new, "新学期切换（摘上学期、接本学期）")
+    sp.add_argument("--yes", action="store_true")
 
     add("pause", cmd_pause, "暂停推送")
     add("resume", cmd_resume, "恢复推送")
@@ -985,7 +1607,6 @@ def build_parser():
     sp.add_argument("harness", nargs="?")
 
     add("harnesses", cmd_harnesses, "看各助手装在哪")
-    add("prompt", cmd_prompt, "获取给 Agent 定时任务的远程对话 Prompt")
     add("help", lambda a: (print(HELP), 0)[1], "帮助")
     return p
 

@@ -66,8 +66,15 @@ def build_blocks(advanced=False):
         {
             "id": "download",
             "title": "第 3 块 · 文件下载到哪",
-            "why": "新课件/作业自动下载，省得你天天点。先在你电脑里找一圈，你挑一个就行。",
+            "why": "新课件/作业自动下载，省得你天天点。先在你电脑里找一圈，你挑一个就行；顺便定一下下载下来的文件怎么命名。",
             "questions": [
+                {"key": "download.naming",
+                 "prompt": "下载下来的文件怎么命名？（回车=默认，形如 MAT203-Animals.txt）",
+                 "default": "default", "type": "choice",
+                 "choices": ["default", "plain", "original", "custom"]},
+                {"key": "download.name_template",
+                 "prompt": "自定义命名模板（只有上一条选 custom 才生效；其他情况直接回车）",
+                 "default": "{code}-{name}", "advanced": True},
                 {"key": "download.by_type", "prompt": "要不要再按文件类型分（作业/讲义/教材）？",
                  "default": False, "type": "bool", "advanced": True},
             ],
@@ -276,6 +283,16 @@ def discover_and_pick(interactive=True, auto_all=False):
         courses[key].update({"id": c["id"], "name": c["name"]})
         courses[key].setdefault("path", os.path.join(base, c["name"], ""))
         courses[key].setdefault("mute", False)
+        # 命名规则要用的课程代号与短名（课名里抠 → MAT203；抠不到 → Moodle 短名）
+        if c.get("shortname"):
+            courses[key].setdefault("shortname", c["shortname"])
+        try:
+            from moodle_client import resolve_course_code
+            code = resolve_course_code(c, c["name"])
+        except Exception:
+            code = ""
+        if code:
+            courses[key].setdefault("code", code)
     cs.save_courses(courses)
     return True, "已选 %d 门课，配置写入 %s" % (len(selected), cs.courses_path())
 
@@ -286,8 +303,9 @@ def run_interactive(advanced=False, resume=True):
     prog = load_progress() if resume else {"done_blocks": [], "answers": {}}
     blocks = build_blocks(advanced=advanced)
 
-    print(_c("1", "\n  Moodle-killer 配置向导"))
+    print(_c("1", "\n  Moodle-killer · Moodle 配置向导"))
     print(_c("90", "  一次问一块，回车用默认值；随时输入「跳过」「上一步」「退出」。"))
+    print(_c("90", "  只想同步 Teams 文件？让 Agent 帮你「配置 Teams 同步」，无需填写 Moodle 账号。"))
     print(_c("90", "  中途退出不会丢，下次接着问。\n"))
 
     pending = [b for b in blocks if b["id"] not in prog.get("done_blocks", [])]
@@ -348,7 +366,8 @@ def run_interactive(advanced=False, resume=True):
             if q.get("type") == "choice":
                 choices = q.get("choices", [])
                 print(_c("90", "  可选项：" + " / ".join(
-                    "%s=%s" % (c, cs.MODE_LABELS.get(c) or cs.CHANNEL_LABELS.get(c) or c) for c in choices)))
+                    "%s=%s" % (c, (cs.MODE_LABELS.get(c) or cs.CHANNEL_LABELS.get(c)
+                                   or cs.NAMING_LABELS.get(c) or c)) for c in choices)))
             action, value = _ask(q["prompt"], default=default, secret=q.get("secret"))
             if action == "quit":
                 save_progress(prog)
@@ -413,6 +432,7 @@ def run_interactive(advanced=False, resume=True):
     print("  看看现在什么情况：mk status")
     print("  试跑一次：       mk test")
     print("  以后想改哪项：   mk set 时间 07:00")
+    print("  还要同步 Teams？  让 Agent 帮你「配置 Teams 同步」")
     clear_progress()
     return 0
 

@@ -96,7 +96,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1   # 自动补齐依赖 + 
 
 ```bash
 mk setup              # 快速配置
-mk test               # 检测是否运行正常
+mk test               # 检测是否运行正常（试跑，不写状态）
+mk fresh              # 立刻完整重扫一次（真跑，不占定时名额）
+mk new                # 新学期切换（先预览；确认后 mk new --yes）
 mk channel test       # 实际发送测试消息，确认通道可用
 mk                    # 查看当前状态（配置 / 课程 / 下次推送）
 ```
@@ -113,16 +115,34 @@ mk                    # 查看当前状态（配置 / 课程 / 下次推送）
 | `mk set 时间 07:00` | 改一项配置；不带值查看当前值 |
 | `mk add` / `mk rm 课名` | 加课 / 删课 |
 | `mk output silent` | 换推送风格（heartbeat / silent / digest / urgent / full） |
+| `mk naming` | 看下载下来的**文件**会叫什么名字（拿你自己的课演示，不联网） |
+| `mk folder` / `mk folder "模版"` | 看/改**课程文件夹**命名（字段 `{code}` `{name}` `{teacher}` `{semester}`…） |
+| `mk folder --demo` / `mk folder --apply` | 并排对比几种组合 / 按当前模板真改现有文件夹（先备份配置） |
+| `mk naming default\|plain\|original\|custom` | 换文件命名规则；`mk naming --demo` 四种并排对比 |
 | `mk channel [通道]` | 换推送通道（auto / local / telegram / webhook / ntfy） |
-| `mk channel test` / `mk send "测试消息"` | 通过当前通道实际发送一条测试消息 |
-| `mk test` | 试跑，不推送 |
+| `mk channel test` | 通过当前通道实际发送一条测试消息 |
+| `mk test` | 试跑：不推送、不写状态（看「现在有什么在等」） |
+| `mk fresh` | 立刻完整重扫一次：真下载、真勾 Done、真写状态，不占定时名额 |
+| `mk new` / `mk new --yes` | 新学期切换：预览 / 真执行（摘上学期的课、接本学期的课） |
+| `mk code` / `mk code --apply` | 看/查课程代号（Course Code）/ 把查到的写进配置 |
+| `mk code 课名 代号` | 人工指定某门课的代号（最高可信，之后不再被自动改） |
 | `mk find 概率` | 智能找课件文件夹 |
 | `mk doctor` | 检查环境与状态，给出修复建议 |
-| `mk sandbox` | 创建隔离测试环境，不碰现有配置 |
 | `mk pause` / `mk resume` | 暂停 / 恢复推送 |
 | `mk help` | 全部命令 |
 
 更多命令（`mk output --demo`、`mk mute`、`mk schedule`、`mk set --advanced`、任何命令加 `--json`）→ `mk help`，或看 [`moodle-killer/references/CONFIG.md`](moodle-killer/references/CONFIG.md)。
+
+## 文件夹与文件名，两套命名
+
+| | 命令 | 例子 |
+|---|---|---|
+| **课程文件夹**（每门课落在哪、叫什么） | `mk folder` / `mk folder "{code} {name}"` / `mk folder --apply` | `Knowledge/MAT203 Statistics/` |
+| **文件**（下载下来的每个课件叫什么） | `mk naming` / `mk set 命名模板 "{code}-{name}"` | `MAT203-Chap-1-Descriptive-Statistics.pdf` |
+
+文件夹模板可用字段：`{code}`（课程代号，只认 `MAT203` 这种）、`{name}`（课程名，已剔除代号/学期/老师）、`{teacher}`、`{semester}`（`2026-09`）、`{shortname}`、`{fullname}`。默认 `{code} {name}`。
+
+`mk folder --apply` 只重命名文件夹并更新配置路径（文件内容不动）；两门课算成同名或目标目录已存在时**跳过并报错，绝不合并**。改模板只影响以后新接的课，改现有的要跑 `--apply`。
 
 ## 5 种推送风格
 
@@ -201,10 +221,9 @@ Moodle-killer/
 │   │   ├── sender.py                # 推送通道（auto 跟随平台）
 │   │   ├── platform_support.py      # 平台差异分支（Mac / Windows / Linux）
 │   │   ├── pathfinder.py            # 自动找课件文件夹 + 编号挑选
-│   │   ├── sandbox.py               # 隔离测试环境（mk sandbox）
 │   │   ├── verify.py                # 步骤校验 + 自检
 │   │   └── harness_install.py       # 装到 3 个标准技能目录
-│   ├── references/                  # 配置 / 风格 / 排障 / 沙盒细则
+│   ├── references/                  # 配置 / 风格 / 排障细则
 │   ├── templates/                   # 配置模板
 │   └── agents/                      # 框架专属适配（预留）
 └── docs/                            # 架构图等

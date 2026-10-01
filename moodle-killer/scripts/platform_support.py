@@ -65,7 +65,11 @@ def is_linux() -> bool:
 
 
 def in_sandbox() -> bool:
-    """是不是在测试沙盒里跑（mk sandbox 造的那台「假电脑」）。"""
+    """是不是在隔离环境里跑（测试用：MOODLE_KILLER_SANDBOX=1）。
+
+    真机上手跑命令时是空的；测试套件会设上它，好让 install/remove_scheduler 这类
+    「一装就是全机生效」的动作绝不落到真实系统上。
+    """
     return bool(os.environ.get("MOODLE_KILLER_SANDBOX"))
 
 

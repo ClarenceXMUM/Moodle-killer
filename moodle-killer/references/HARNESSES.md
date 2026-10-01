@@ -51,7 +51,7 @@ codex debug prompt-input | grep moodle-killer    # Codex（Gemini 要真终端�
 
 判断标准不止「能看到名字」：**装的是整个目录**——里面要同时有 `SKILL.md`、`scripts/mk.py`、`references/`。只有 `SKILL.md` 就是脚本没跟过去，跑不起来。
 
-**Codex 有个坑**：它会从工作目录一层层往上找 `.agents/skills`。站在 `~` 底下的某个目录里跑 Codex，可能同时读到两份、互相打架。`mk sandbox status` 里的「Codex 自查」会直接告诉你读到的是哪一份。
+**Codex 有个坑**：它会从工作目录一层层往上找 `.agents/skills`。站在 `~` 底下的某个目录里跑 Codex，可能同时读到两份、互相打架。拿不准它读的是哪一份，就在那个目录里跑 `mk harnesses`（列出三处安装位置），或直接看它报错里引用的脚本路径。
 
 ---
 
@@ -90,7 +90,7 @@ mk doctor          # 体检
 
 1. 检查动态：
    执行命令：python3 -c "import sys, os; sys.path.insert(0, os.path.expanduser('~/.agents/skills/moodle-killer/scripts')); import moodle_prep; moodle_prep.main([])"
-   （如果终端已安装 mk 命令，也可直接执行：mk）
+   （注意：终端里的 `mk` 只是看状态，`mk fresh` 才是完整跑一次扫描——但定时任务里要的是拿输出投递，所以照上面这条调脚本）
 
 2. 处理输出与兜底：
    - 提取命令输出的信号列表以及 ~/.moodle-killer/out/signals.txt。
@@ -102,7 +102,7 @@ mk doctor          # 体检
    - 若扫描出现错误（❌）：必须原样透出错误详情，提醒我检查网络或重新登录。
 ```
 
-> 提示：在命令行执行 `mk prompt` 可随时一键复制这段 Prompt。
+> 以本文为准直接复制上面的代码块（早先有个 `mk prompt` 命令输出它，已删：那只是本文的副本，容易过期）。
 
 ---
 
